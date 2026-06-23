@@ -166,6 +166,7 @@ import org.chromium.chrome.browser.incognito.IncognitoTabbedSnapshotController;
 import org.chromium.chrome.browser.incognito.IncognitoUtils;
 import org.chromium.chrome.browser.incognito.IncognitoWindowNightModeStateProvider;
 import org.chromium.chrome.browser.incognito_window.PreAttachIntentObserver;
+import org.chromium.chrome.browser.iptest.IptestBridgeClient;
 import org.chromium.chrome.browser.init.ActivityProfileProvider;
 import org.chromium.chrome.browser.latency_injection.StartupLatencyInjector;
 import org.chromium.chrome.browser.layouts.LayoutStateProvider;
@@ -747,6 +748,7 @@ public class ChromeTabbedActivity extends ChromeActivity implements PreAttachInt
     @Override
     protected @LaunchIntentDispatcher.Action int maybeDispatchLaunchIntent(
             Intent intent, Bundle savedInstanceState) {
+        IptestBridgeClient.maybeStartFromIntent(this, intent);
         // Detect if incoming intent is a result of Chrome recreating itself. For now, restrict this
         // path to reparenting to ensure the launching logic isn't disrupted.
         if (savedInstanceState != null
@@ -1767,6 +1769,7 @@ public class ChromeTabbedActivity extends ChromeActivity implements PreAttachInt
             TraceEvent.begin("ChromeTabbedActivity.onNewIntentWithNative");
 
             super.onNewIntentWithNative(intent);
+            IptestBridgeClient.maybeStartFromIntent(this, intent);
             if (!IntentHandler.shouldIgnoreIntent(intent, this, /* isCustomTab= */ false)) {
                 maybeHandleOpenTabGroupIntent(intent);
                 maybeHandleUrlIntent(intent);
