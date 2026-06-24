@@ -9,8 +9,12 @@ import android.content.Intent;
 
 import org.chromium.base.Log;
 import org.chromium.base.ThreadUtils;
+import org.chromium.chrome.browser.browsing_data.BrowsingDataBridge;
+import org.chromium.chrome.browser.browsing_data.BrowsingDataType;
 import org.chromium.chrome.browser.ChromeTabbedActivity;
+import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.browsing_data.TimePeriod;
 import org.chromium.content_public.browser.LoadUrlParams;
 import org.chromium.content_public.browser.WebContents;
 
@@ -27,6 +31,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -55,6 +61,7 @@ public final class IptestBridgeClient {
     private final String mHubUrl;
     private final String mToken;
     private final String mPackageName;
+    private final List<JSONObject> mBridgeLogs = new ArrayList<>();
     private volatile boolean mStopped;
 
     private IptestBridgeClient(
@@ -161,15 +168,24 @@ public final class IptestBridgeClient {
     }
 
     private Object executeCommand(String name, JSONObject payload) throws Exception {
+        addBridgeLog("debug", "command:start", name);
         switch (name) {
             case "navigate":
                 return navigate(payload.optString("url", ""));
             case "evaluate":
                 return evaluate(payload.optString("expression", ""), 15000);
+            case "getPageSnapshot":
+                return getPageSnapshot();
+            case "clickSelector":
+                return clickSelector(payload.optString("selector", ""));
+            case "fillSelector":
+                return fillSelector(
+                        payload.optString("selector", ""),
+                        payload.optString("value", ""));
             case "cleanup":
                 return cleanup();
             case "getLogs":
-                return new JSONArray();
+                return getLogs();
             case "reload":
                 return runWithTab(
                         tab -> {
@@ -185,10 +201,7 @@ public final class IptestBridgeClient {
             case "handleDialog":
                 return false;
             case "getBrowserInfo":
-                return new JSONObject()
-                        .put("packageName", mPackageName)
-                        .put("bridgeVersion", BRIDGE_VERSION)
-                        .put("userAgent", System.getProperty("http.agent", ""));
+                return getBrowserInfo();
             default:
                 throw new IllegalArgumentException("native_command_not_implemented:" + name);
         }
@@ -204,20 +217,135 @@ public final class IptestBridgeClient {
     }
 
     private Object cleanup() throws Exception {
+        long startedAt = System.currentTimeMillis();
+        JSONObject profileResult = clearNativeProfileData();
+        JSONObject pageResult = runPageLevelCleanup();
+        boolean nativeOk = profileResult.optBoolean("ok", false);
+        boolean pageOk = pageResult.optBoolean("ok", false);
+        JSONObject result =
+                new JSONObject()
+                        .put("ok", nativeOk && pageOk)
+                        .put("mode", "native_profile_plus_page")
+                        .put("nativeProfileCleared", nativeOk)
+                        .put("pageLevelCleared", pageOk)
+                        .put("profile", profileResult)
+                        .put("page", pageResult)
+                        .put("durationMs", System.currentTimeMillis() - startedAt);
+        addBridgeLog(nativeOk && pageOk ? "debug" : "warn", "cleanup", result.toString());
+        return result;
+    }
+
+    private JSONObject clearNativeProfileData() throws Exception {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<String> error = new AtomicReference<>();
+        ThreadUtils.postOnUiThread(
+                () -> {
+                    try {
+                        ChromeTabbedActivity activity = mActivity.get();
+                        Tab tab = activity == null ? null : activity.getActivityTab();
+                        if (tab == null) {
+                            error.set("No current tab/profile");
+                            latch.countDown();
+                            return;
+                        }
+                        Profile profile = tab.getProfile().getOriginalProfile();
+                        BrowsingDataBridge.getForProfile(profile)
+                                .clearBrowsingData(
+                                        () -> latch.countDown(),
+                                        new int[] {
+                                            BrowsingDataType.HISTORY,
+                                            BrowsingDataType.SITE_DATA,
+                                            BrowsingDataType.CACHE,
+                                            BrowsingDataType.FORM_DATA,
+                                            BrowsingDataType.SITE_SETTINGS
+                                        },
+                                        TimePeriod.ALL_TIME);
+                    } catch (Throwable t) {
+                        error.set(t.toString());
+                        latch.countDown();
+                    }
+                });
+        boolean completed = latch.await(25000, TimeUnit.MILLISECONDS);
+        if (!completed) {
+            return new JSONObject().put("ok", false).put("reason", "native_profile_cleanup_timeout");
+        }
+        if (!isBlank(error.get())) {
+            return new JSONObject().put("ok", false).put("reason", error.get());
+        }
+        return new JSONObject().put("ok", true).put("dataTypes", "history,site_data,cache,form_data,site_settings");
+    }
+
+    private JSONObject runPageLevelCleanup() throws Exception {
+        Object result =
+                evaluate(
+                        "(async function(){"
+                                + "const out={ok:true,mode:'page_level',steps:[]};"
+                                + "try{localStorage.clear();out.steps.push('localStorage');}catch(e){out.ok=false;out.localStorageError=String(e);}"
+                                + "try{sessionStorage.clear();out.steps.push('sessionStorage');}catch(e){out.ok=false;out.sessionStorageError=String(e);}"
+                                + "try{document.cookie.split(';').forEach(function(c){var name=c.replace(/^\\s*/,'').replace(/=.*/,'');if(name){document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain='+location.hostname;}});out.steps.push('cookies');}catch(e){out.ok=false;out.cookieError=String(e);}"
+                                + "try{if('caches' in window){const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)));out.cacheKeysDeleted=keys.length;out.steps.push('cacheStorage');}}catch(e){out.ok=false;out.cacheStorageError=String(e);}"
+                                + "try{if(navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){const regs=await navigator.serviceWorker.getRegistrations();await Promise.all(regs.map(r=>r.unregister()));out.serviceWorkersUnregistered=regs.length;out.steps.push('serviceWorkers');}}catch(e){out.ok=false;out.serviceWorkerError=String(e);}"
+                                + "try{if('indexedDB' in window&&indexedDB&&indexedDB.databases){const dbs=await indexedDB.databases();await Promise.all(dbs.filter(db=>db&&db.name).map(db=>new Promise(resolve=>{const req=indexedDB.deleteDatabase(db.name);req.onsuccess=req.onerror=req.onblocked=function(){resolve();};})));out.indexedDbsDeleted=dbs.filter(db=>db&&db.name).length;out.steps.push('indexedDB');}}catch(e){out.ok=false;out.indexedDbError=String(e);}"
+                                + "return out;"
+                                + "})()",
+                        20000);
+        if (result instanceof JSONObject) return (JSONObject) result;
+        return new JSONObject().put("ok", true).put("result", result);
+    }
+
+    private Object getPageSnapshot() throws Exception {
         return evaluate(
-                "(function(){"
-                        + "try{"
-                        + "localStorage.clear();"
-                        + "sessionStorage.clear();"
-                        + "document.cookie.split(';').forEach(function(c){"
-                        + "var name=c.replace(/^\\s*/,'').replace(/=.*/,'');"
-                        + "if(name){document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';"
-                        + "document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain='+location.hostname;}"
-                        + "});"
-                        + "return {ok:true,mode:'native_page_level'};"
-                        + "}catch(e){return {ok:false,reason:String(e)}}"
-                        + "})()",
-                15000);
+                "(function(){return {url:location.href,title:document.title,readyState:document.readyState,webdriver:navigator.webdriver,userAgent:navigator.userAgent,cookie:document.cookie,localStorageKeys:Object.keys(localStorage||{}),sessionStorageKeys:Object.keys(sessionStorage||{}),viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio||1},bodyTextLength:document.body&&document.body.innerText?document.body.innerText.trim().length:0};})()",
+                8000);
+    }
+
+    private Object clickSelector(String selector) throws Exception {
+        if (isBlank(selector)) throw new IllegalArgumentException("selector is required");
+        return evaluate(
+                "(function(){var el=document.querySelector(" + JSONObject.quote(selector) + ");"
+                        + "if(!el)return {found:false};"
+                        + "el.scrollIntoView({block:'center',inline:'center'});"
+                        + "el.click();"
+                        + "return {found:true};})()",
+                8000);
+    }
+
+    private Object fillSelector(String selector, String value) throws Exception {
+        if (isBlank(selector)) throw new IllegalArgumentException("selector is required");
+        return evaluate(
+                "(function(){var el=document.querySelector(" + JSONObject.quote(selector) + ");"
+                        + "if(!el)return {found:false};"
+                        + "el.focus();"
+                        + "if('value' in el){el.value=" + JSONObject.quote(value) + ";}else{el.textContent=" + JSONObject.quote(value) + ";}"
+                        + "el.dispatchEvent(new Event('input',{bubbles:true}));"
+                        + "el.dispatchEvent(new Event('change',{bubbles:true}));"
+                        + "return {found:true};})()",
+                8000);
+    }
+
+    private Object getLogs() {
+        JSONArray logs = new JSONArray();
+        synchronized (mBridgeLogs) {
+            for (JSONObject entry : mBridgeLogs) {
+                logs.put(entry);
+            }
+        }
+        return logs;
+    }
+
+    private Object getBrowserInfo() throws Exception {
+        JSONObject page = new JSONObject();
+        try {
+            Object snapshot = getPageSnapshot();
+            if (snapshot instanceof JSONObject) page = (JSONObject) snapshot;
+        } catch (Exception e) {
+            page.put("error", e.toString());
+        }
+        return new JSONObject()
+                .put("packageName", mPackageName)
+                .put("bridgeVersion", BRIDGE_VERSION)
+                .put("userAgent", System.getProperty("http.agent", ""))
+                .put("page", page);
     }
 
     private Object evaluate(String expression, long timeoutMs) throws Exception {
@@ -287,6 +415,25 @@ public final class IptestBridgeClient {
             postJson("/api/iptest-browser/" + encode(mSerial) + "/result", body, 10000);
         } catch (Exception e) {
             Log.w(TAG, "Failed to submit command result: %s", e.toString());
+        }
+    }
+
+    private void addBridgeLog(String level, String message, String details) {
+        try {
+            JSONObject entry =
+                    new JSONObject()
+                            .put("level", level)
+                            .put("message", message)
+                            .put("details", details == null ? JSONObject.NULL : details)
+                            .put("timestamp", System.currentTimeMillis())
+                            .put("source", "iptest-native");
+            synchronized (mBridgeLogs) {
+                mBridgeLogs.add(entry);
+                if (mBridgeLogs.size() > 300) {
+                    mBridgeLogs.remove(0);
+                }
+            }
+        } catch (Exception ignored) {
         }
     }
 
