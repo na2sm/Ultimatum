@@ -14,6 +14,7 @@ import org.chromium.chrome.browser.browsing_data.BrowsingDataType;
 import org.chromium.chrome.browser.ChromeTabbedActivity;
 import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.tab.Tab;
+import org.chromium.chrome.browser.tab.TabLaunchType;
 import org.chromium.chrome.browser.browsing_data.TimePeriod;
 import org.chromium.content_public.browser.LoadUrlParams;
 import org.chromium.content_public.browser.WebContents;
@@ -188,12 +189,14 @@ public final class IptestBridgeClient {
                 return getLogs();
             case "reload":
                 return runWithTab(
+                        "about:blank",
                         tab -> {
                             tab.reload();
                             return new JSONObject().put("ok", true);
                         });
             case "goForward":
                 return runWithTab(
+                        "about:blank",
                         tab -> {
                             tab.goForward();
                             return new JSONObject().put("ok", true);
@@ -210,6 +213,7 @@ public final class IptestBridgeClient {
     private Object navigate(String url) throws Exception {
         if (isBlank(url)) throw new IllegalArgumentException("navigate url is required");
         return runWithTab(
+                url,
                 tab -> {
                     tab.loadUrl(new LoadUrlParams(url));
                     return new JSONObject().put("ok", true).put("url", url);
@@ -242,9 +246,9 @@ public final class IptestBridgeClient {
                 () -> {
                     try {
                         ChromeTabbedActivity activity = mActivity.get();
-                        Tab tab = activity == null ? null : activity.getActivityTab();
+                        Tab tab = getOrCreateActivityTab(activity, "about:blank");
                         if (tab == null) {
-                            error.set("No current tab/profile");
+                            error.set("No current tab/profile " + describeActivityState(activity));
                             latch.countDown();
                             return;
                         }
@@ -355,6 +359,7 @@ public final class IptestBridgeClient {
 
     private Object evaluate(String expression, long timeoutMs) throws Exception {
         if (isBlank(expression)) throw new IllegalArgumentException("evaluate expression is required");
+        waitForWebContents("about:blank", Math.min(Math.max(5000, timeoutMs), 15000));
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<String> rawResult = new AtomicReference<>();
         AtomicReference<String> error = new AtomicReference<>();
@@ -363,10 +368,10 @@ public final class IptestBridgeClient {
                 () -> {
                     try {
                         ChromeTabbedActivity activity = mActivity.get();
-                        WebContents webContents =
-                                activity == null ? null : activity.getCurrentWebContents();
+                        Tab tab = getOrCreateActivityTab(activity, "about:blank");
+                        WebContents webContents = tab == null ? null : tab.getWebContents();
                         if (webContents == null) {
-                            error.set("No current WebContents");
+                            error.set("No current WebContents " + describeActivityState(activity));
                             latch.countDown();
                             return;
                         }
@@ -389,15 +394,90 @@ public final class IptestBridgeClient {
         return parseJsonResult(rawResult.get());
     }
 
-    private <T> T runWithTab(TabCallable<T> callable) throws Exception {
+    private void waitForWebContents(String fallbackUrl, long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + Math.max(1000, timeoutMs);
+        String lastState = "";
+        while (System.currentTimeMillis() < deadline) {
+            AtomicReference<String> state = new AtomicReference<>("");
+            Boolean ready =
+                    ThreadUtils.runOnUiThreadBlocking(
+                            () -> {
+                                ChromeTabbedActivity activity = mActivity.get();
+                                state.set(describeActivityState(activity));
+                                Tab tab = getOrCreateActivityTab(activity, fallbackUrl);
+                                return tab != null && tab.getWebContents() != null;
+                            });
+            lastState = state.get();
+            if (Boolean.TRUE.equals(ready)) return;
+            sleep(250);
+        }
+        throw new IllegalStateException("No current WebContents after wait " + lastState);
+    }
+
+    private Tab getOrCreateActivityTab(ChromeTabbedActivity activity, String fallbackUrl) {
+        if (activity == null) return null;
+        Tab tab = activity.getActivityTab();
+        if (tab != null) return tab;
+        if (!activity.didFinishNativeInitialization() || !activity.areTabModelsInitialized()) {
+            return null;
+        }
+        try {
+            String url = isBlank(fallbackUrl) ? "about:blank" : fallbackUrl;
+            tab =
+                    activity.getTabCreator(false)
+                            .createNewTab(
+                                    new LoadUrlParams(url),
+                                    TabLaunchType.FROM_CHROME_UI,
+                                    /* parent= */ null);
+            if (tab != null) {
+                addBridgeLog("debug", "tab:create", url);
+                return tab;
+            }
+        } catch (Throwable t) {
+            addBridgeLog("warn", "tab:create_failed", t.toString());
+        }
+        return activity.getActivityTab();
+    }
+
+    private String describeActivityState(ChromeTabbedActivity activity) {
+        if (activity == null) return "(activity=null)";
+        boolean nativeReady = false;
+        boolean tabModelsReady = false;
+        int tabCount = -1;
+        try {
+            nativeReady = activity.didFinishNativeInitialization();
+        } catch (Throwable ignored) {
+        }
+        try {
+            tabModelsReady = activity.areTabModelsInitialized();
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (tabModelsReady) tabCount = activity.getCurrentTabModel().getCount();
+        } catch (Throwable ignored) {
+        }
+        return "(nativeReady="
+                + nativeReady
+                + ", tabModelsReady="
+                + tabModelsReady
+                + ", tabCount="
+                + tabCount
+                + ")";
+    }
+
+    private <T> T runWithTab(String fallbackUrl, TabCallable<T> callable) throws Exception {
+        waitForWebContents(fallbackUrl, 15000);
         AtomicReference<Exception> error = new AtomicReference<>();
         T result =
                 ThreadUtils.runOnUiThreadBlocking(
                         () -> {
                             try {
                                 ChromeTabbedActivity activity = mActivity.get();
-                                Tab tab = activity == null ? null : activity.getActivityTab();
-                                if (tab == null) throw new IllegalStateException("No current tab");
+                                Tab tab = getOrCreateActivityTab(activity, fallbackUrl);
+                                if (tab == null) {
+                                    throw new IllegalStateException(
+                                            "No current tab " + describeActivityState(activity));
+                                }
                                 return callable.call(tab);
                             } catch (Exception e) {
                                 error.set(e);
