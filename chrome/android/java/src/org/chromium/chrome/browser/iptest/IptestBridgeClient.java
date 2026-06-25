@@ -17,6 +17,7 @@ import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tab.TabLaunchType;
 import org.chromium.chrome.browser.browsing_data.TimePeriod;
 import org.chromium.content_public.browser.LoadUrlParams;
+import org.chromium.content_public.browser.RenderFrameHost;
 import org.chromium.content_public.browser.WebContents;
 
 import org.json.JSONArray;
@@ -360,6 +361,25 @@ public final class IptestBridgeClient {
     private Object evaluate(String expression, long timeoutMs) throws Exception {
         if (isBlank(expression)) throw new IllegalArgumentException("evaluate expression is required");
         waitForWebContents("about:blank", Math.min(Math.max(5000, timeoutMs), 15000));
+        long primaryTimeoutMs = Math.min(Math.max(2500, timeoutMs / 3), 5000);
+        try {
+            return evaluateWithWebContents(expression, primaryTimeoutMs);
+        } catch (Exception primaryError) {
+            addBridgeLog("warn", "evaluate:fallback_isolated_world", primaryError.toString());
+            try {
+                return evaluateWithMainFrame(expression, Math.max(1000, timeoutMs - primaryTimeoutMs));
+            } catch (Exception fallbackError) {
+                throw new IllegalStateException(
+                        "evaluate failed; webContents="
+                                + primaryError
+                                + "; mainFrame="
+                                + fallbackError,
+                        fallbackError);
+            }
+        }
+    }
+
+    private Object evaluateWithWebContents(String expression, long timeoutMs) throws Exception {
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<String> rawResult = new AtomicReference<>();
         AtomicReference<String> error = new AtomicReference<>();
@@ -389,6 +409,44 @@ public final class IptestBridgeClient {
 
         if (!latch.await(Math.max(1000, timeoutMs), TimeUnit.MILLISECONDS)) {
             throw new IllegalStateException("evaluate timeout");
+        }
+        if (!isBlank(error.get())) throw new IllegalStateException(error.get());
+        return parseJsonResult(rawResult.get());
+    }
+
+    private Object evaluateWithMainFrame(String expression, long timeoutMs) throws Exception {
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<String> rawResult = new AtomicReference<>();
+        AtomicReference<String> error = new AtomicReference<>();
+
+        ThreadUtils.postOnUiThread(
+                () -> {
+                    try {
+                        ChromeTabbedActivity activity = mActivity.get();
+                        Tab tab = getOrCreateActivityTab(activity, "about:blank");
+                        WebContents webContents = tab == null ? null : tab.getWebContents();
+                        RenderFrameHost mainFrame =
+                                webContents == null ? null : webContents.getMainFrame();
+                        if (mainFrame == null || !mainFrame.isRenderFrameLive()) {
+                            error.set("No live main frame " + describeActivityState(activity));
+                            latch.countDown();
+                            return;
+                        }
+                        mainFrame.executeJavaScriptInIsolatedWorld(
+                                expression,
+                                1,
+                                jsonResult -> {
+                                    rawResult.set(jsonResult);
+                                    latch.countDown();
+                                });
+                    } catch (Throwable t) {
+                        error.set(t.toString());
+                        latch.countDown();
+                    }
+                });
+
+        if (!latch.await(Math.max(1000, timeoutMs), TimeUnit.MILLISECONDS)) {
+            throw new IllegalStateException("main frame evaluate timeout");
         }
         if (!isBlank(error.get())) throw new IllegalStateException(error.get());
         return parseJsonResult(rawResult.get());
