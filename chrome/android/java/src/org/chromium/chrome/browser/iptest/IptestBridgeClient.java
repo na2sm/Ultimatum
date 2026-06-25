@@ -163,9 +163,12 @@ public final class IptestBridgeClient {
         JSONObject payload = command.optJSONObject("payload");
         if (payload == null) payload = new JSONObject();
         try {
+            Log.i(TAG, "Command start: %s id=%s state=%s", name, id, readActivityState());
             Object result = executeCommand(name, payload);
+            Log.i(TAG, "Command success: %s id=%s", name, id);
             submitResult(id, true, result, null);
         } catch (Exception e) {
+            Log.w(TAG, "Command failed: %s id=%s error=%s state=%s", name, id, e.toString(), readActivityState());
             submitResult(id, false, null, e.toString());
         }
     }
@@ -423,7 +426,7 @@ public final class IptestBridgeClient {
                 });
 
         if (!latch.await(Math.max(1000, timeoutMs), TimeUnit.MILLISECONDS)) {
-            throw new IllegalStateException("evaluate timeout");
+            throw new IllegalStateException("evaluate timeout " + readActivityState());
         }
         if (!isBlank(error.get())) throw new IllegalStateException(error.get());
         return parseJsonResult(rawResult.get());
@@ -461,7 +464,7 @@ public final class IptestBridgeClient {
                 });
 
         if (!latch.await(Math.max(1000, timeoutMs), TimeUnit.MILLISECONDS)) {
-            throw new IllegalStateException("main frame evaluate timeout");
+            throw new IllegalStateException("main frame evaluate timeout " + readActivityState());
         }
         if (!isBlank(error.get())) throw new IllegalStateException(error.get());
         return parseJsonResult(rawResult.get());
@@ -478,13 +481,13 @@ public final class IptestBridgeClient {
                                 ChromeTabbedActivity activity = mActivity.get();
                                 state.set(describeActivityState(activity));
                                 Tab tab = getOrCreateActivityTab(activity, fallbackUrl);
-                                return tab != null && tab.getWebContents() != null;
+                                return isTabReadyForJs(tab);
                             });
             lastState = state.get();
             if (Boolean.TRUE.equals(ready)) return;
             sleep(250);
         }
-        throw new IllegalStateException("No current WebContents after wait " + lastState);
+        throw new IllegalStateException("No JS-ready WebContents after wait " + lastState);
     }
 
     private Tab getOrCreateActivityTab(ChromeTabbedActivity activity, String fallbackUrl) {
@@ -517,6 +520,7 @@ public final class IptestBridgeClient {
         boolean nativeReady = false;
         boolean tabModelsReady = false;
         int tabCount = -1;
+        String tabState = "(tab=unknown)";
         try {
             nativeReady = activity.didFinishNativeInitialization();
         } catch (Throwable ignored) {
@@ -529,13 +533,88 @@ public final class IptestBridgeClient {
             if (tabModelsReady) tabCount = activity.getCurrentTabModel().getCount();
         } catch (Throwable ignored) {
         }
+        try {
+            tabState = describeTabState(activity.getActivityTab());
+        } catch (Throwable ignored) {
+        }
         return "(nativeReady="
                 + nativeReady
                 + ", tabModelsReady="
                 + tabModelsReady
                 + ", tabCount="
                 + tabCount
+                + ", "
+                + tabState
                 + ")";
+    }
+
+    private String readActivityState() {
+        try {
+            if (ThreadUtils.runningOnUiThread()) {
+                return describeActivityState(mActivity.get());
+            }
+            return ThreadUtils.runOnUiThreadBlocking(() -> describeActivityState(mActivity.get()));
+        } catch (Throwable t) {
+            return "(state_error=" + t + ")";
+        }
+    }
+
+    private boolean isTabReadyForJs(Tab tab) {
+        if (tab == null || !tab.isInitialized() || tab.isDestroyed() || tab.isClosing()) {
+            return false;
+        }
+        WebContents webContents = tab.getWebContents();
+        RenderFrameHost mainFrame = webContents == null ? null : webContents.getMainFrame();
+        return webContents != null && mainFrame != null && mainFrame.isRenderFrameLive();
+    }
+
+    private String describeTabState(Tab tab) {
+        if (tab == null) return "tab=null";
+        boolean initialized = false;
+        boolean destroyed = false;
+        boolean closing = false;
+        String url = "";
+        boolean hasWebContents = false;
+        boolean hasMainFrame = false;
+        boolean mainFrameLive = false;
+        try {
+            initialized = tab.isInitialized();
+        } catch (Throwable ignored) {
+        }
+        try {
+            destroyed = tab.isDestroyed();
+        } catch (Throwable ignored) {
+        }
+        try {
+            closing = tab.isClosing();
+        } catch (Throwable ignored) {
+        }
+        try {
+            url = String.valueOf(tab.getUrl());
+        } catch (Throwable ignored) {
+        }
+        try {
+            WebContents webContents = tab.getWebContents();
+            hasWebContents = webContents != null;
+            RenderFrameHost mainFrame = webContents == null ? null : webContents.getMainFrame();
+            hasMainFrame = mainFrame != null;
+            mainFrameLive = mainFrame != null && mainFrame.isRenderFrameLive();
+        } catch (Throwable ignored) {
+        }
+        return "tabInitialized="
+                + initialized
+                + ", tabDestroyed="
+                + destroyed
+                + ", tabClosing="
+                + closing
+                + ", hasWebContents="
+                + hasWebContents
+                + ", hasMainFrame="
+                + hasMainFrame
+                + ", mainFrameLive="
+                + mainFrameLive
+                + ", url="
+                + url;
     }
 
     private <T> T runWithTab(String fallbackUrl, TabCallable<T> callable) throws Exception {
