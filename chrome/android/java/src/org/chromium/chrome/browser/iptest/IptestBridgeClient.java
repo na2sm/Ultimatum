@@ -365,7 +365,7 @@ public final class IptestBridgeClient {
                             latch.countDown();
                             return;
                         }
-                        webContents.evaluateJavaScriptForTests(
+                        webContents.evaluateJavaScript(
                                 expression,
                                 jsonResult -> {
                                     rawResult.set(jsonResult);
