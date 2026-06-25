@@ -65,6 +65,7 @@ public final class IptestBridgeClient {
     private final String mPackageName;
     private final List<JSONObject> mBridgeLogs = new ArrayList<>();
     private volatile boolean mStopped;
+    private volatile boolean mPreferIsolatedWorldEval;
 
     private IptestBridgeClient(
             ChromeTabbedActivity activity, String serial, String hubUrl, String token) {
@@ -362,12 +363,26 @@ public final class IptestBridgeClient {
         if (isBlank(expression)) throw new IllegalArgumentException("evaluate expression is required");
         waitForWebContents("about:blank", Math.min(Math.max(5000, timeoutMs), 15000));
         long primaryTimeoutMs = Math.min(Math.max(2500, timeoutMs / 3), 5000);
+        if (mPreferIsolatedWorldEval) {
+            try {
+                return evaluateWithMainFrame(expression, timeoutMs);
+            } catch (Exception isolatedError) {
+                mPreferIsolatedWorldEval = false;
+                addBridgeLog("warn", "evaluate:fallback_webcontents", isolatedError.toString());
+                return evaluateWithWebContents(expression, primaryTimeoutMs);
+            }
+        }
         try {
-            return evaluateWithWebContents(expression, primaryTimeoutMs);
+            Object result = evaluateWithWebContents(expression, primaryTimeoutMs);
+            mPreferIsolatedWorldEval = false;
+            return result;
         } catch (Exception primaryError) {
             addBridgeLog("warn", "evaluate:fallback_isolated_world", primaryError.toString());
             try {
-                return evaluateWithMainFrame(expression, Math.max(1000, timeoutMs - primaryTimeoutMs));
+                Object result =
+                        evaluateWithMainFrame(expression, Math.max(1000, timeoutMs - primaryTimeoutMs));
+                mPreferIsolatedWorldEval = true;
+                return result;
             } catch (Exception fallbackError) {
                 throw new IllegalStateException(
                         "evaluate failed; webContents="
