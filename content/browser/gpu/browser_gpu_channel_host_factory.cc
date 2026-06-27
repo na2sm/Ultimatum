@@ -43,10 +43,11 @@ namespace {
 
 #if BUILDFLAG(IS_ANDROID)
 
-// This is used as the stack frame to group these timeout crashes, so avoid
-// renaming it or moving the LOG(FATAL) call.
+// This is used as the stack frame to group these timeout events, so avoid
+// renaming it. IP-TEST treats the timeout as recoverable instead of crashing the
+// browser process.
 NOINLINE void TimedOut() {
-  LOG(FATAL) << "Timed out waiting for GPU channel.";
+  LOG(ERROR) << "Timed out waiting for GPU channel.";
 }
 
 void DumpGpuStackOnProcessThread() {
@@ -56,6 +57,11 @@ void DumpGpuStackOnProcessThread() {
     host->DumpProcessStack();
   }
   TimedOut();
+  BrowserGpuChannelHostFactory* factory =
+      BrowserGpuChannelHostFactory::instance();
+  if (factory) {
+    factory->GpuChannelTimedOutForIptest();
+  }
 }
 
 #endif  // BUILDFLAG(IS_ANDROID)
@@ -75,6 +81,7 @@ class BrowserGpuChannelHostFactory::EstablishRequest
 
   void Wait();
   void Cancel();
+  void FailForTimeout();
 
   void AddCallback(gpu::GpuChannelEstablishedCallback callback) {
     established_callbacks_.push_back(std::move(callback));
@@ -262,6 +269,14 @@ void BrowserGpuChannelHostFactory::EstablishRequest::Cancel() {
   established_callbacks_.clear();
 }
 
+void BrowserGpuChannelHostFactory::EstablishRequest::FailForTimeout() {
+  DCHECK(main_task_runner_->BelongsToCurrentThread());
+  if (finished_)
+    return;
+  gpu_channel_ = nullptr;
+  Finish();
+}
+
 void BrowserGpuChannelHostFactory::Initialize(bool establish_gpu_channel) {
   DCHECK(!instance_);
   instance_ = new BrowserGpuChannelHostFactory();
@@ -403,6 +418,16 @@ void BrowserGpuChannelHostFactory::SetApplicationVisible(bool is_visible) {
   } else {
     timeout_.Stop();
   }
+}
+
+void BrowserGpuChannelHostFactory::GpuChannelTimedOutForIptest() {
+  DCHECK(BrowserThread::CurrentlyOn(BrowserThread::UI));
+  if (!pending_request_)
+    return;
+
+  LOG(ERROR) << "Failing pending GPU channel request after timeout.";
+  scoped_refptr<EstablishRequest> request = pending_request_;
+  request->FailForTimeout();
 }
 
 gpu::GpuChannelHost* BrowserGpuChannelHostFactory::GetGpuChannel() {

@@ -13,12 +13,17 @@ import org.chromium.chrome.browser.browsing_data.BrowsingDataBridge;
 import org.chromium.chrome.browser.browsing_data.BrowsingDataType;
 import org.chromium.chrome.browser.ChromeTabbedActivity;
 import org.chromium.chrome.browser.profiles.Profile;
+import org.chromium.chrome.browser.tab.EmptyTabObserver;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tab.TabLaunchType;
+import org.chromium.chrome.browser.tabmodel.TabModel;
+import org.chromium.chrome.browser.tabmodel.TabModelUtils;
 import org.chromium.chrome.browser.browsing_data.TimePeriod;
 import org.chromium.content_public.browser.LoadUrlParams;
+import org.chromium.content_public.browser.NavigationHandle;
 import org.chromium.content_public.browser.RenderFrameHost;
 import org.chromium.content_public.browser.WebContents;
+import org.chromium.url.GURL;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -35,8 +40,13 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -54,8 +64,12 @@ public final class IptestBridgeClient {
     private static final String TAG = "IptestBridgeClient";
     private static final String BRIDGE_VERSION = "native-v1";
     private static final Object LOCK = new Object();
+    private static final long START_RETRY_DELAY_MS = 300;
+    private static final long START_RETRY_DEADLINE_MS = 60000;
 
     private static IptestBridgeClient sClient;
+    private static PendingLaunch sPendingLaunch;
+    private static boolean sPendingRetryScheduled;
 
     private WeakReference<ChromeTabbedActivity> mActivity;
     private final Context mAppContext;
@@ -66,6 +80,93 @@ public final class IptestBridgeClient {
     private final List<JSONObject> mBridgeLogs = new ArrayList<>();
     private volatile boolean mStopped;
     private volatile boolean mPreferIsolatedWorldEval;
+    private volatile int mAutomationTabId = -1;
+    private volatile boolean mRendererResponsive = true;
+    private volatile long mLastLoadStoppedAt;
+    private volatile long mLastPageLoadFinishedAt;
+    private volatile long mLastNavigationFinishedAt;
+    private volatile String mLastKnownUrl = "";
+    private volatile String mLastNavigationEvent = "";
+    private volatile String mLastNavigationError = "";
+    private volatile String mLastCrash = "";
+    private Tab mObservedTab;
+    private final EmptyTabObserver mAutomationTabObserver =
+            new EmptyTabObserver() {
+                @Override
+                public void onContentChanged(Tab tab) {
+                    recordTabSnapshot(tab, "content_changed");
+                }
+
+                @Override
+                public void onLoadStopped(Tab tab, boolean toDifferentDocument) {
+                    mLastLoadStoppedAt = System.currentTimeMillis();
+                    recordTabSnapshot(tab, "load_stopped");
+                }
+
+                @Override
+                public void onPageLoadFinished(Tab tab, GURL url) {
+                    mLastPageLoadFinishedAt = System.currentTimeMillis();
+                    mLastKnownUrl = url == null ? "" : String.valueOf(url);
+                    recordTabSnapshot(tab, "page_load_finished");
+                }
+
+                @Override
+                public void onDidFinishNavigationInPrimaryMainFrame(
+                        Tab tab, NavigationHandle navigation) {
+                    mLastNavigationFinishedAt = System.currentTimeMillis();
+                    mLastNavigationEvent = "primary_main_frame_finished";
+                    if (navigation != null) {
+                        GURL url = navigation.getUrl();
+                        mLastKnownUrl = url == null ? "" : String.valueOf(url);
+                        if (navigation.isErrorPage() || navigation.errorCode() != 0) {
+                            mLastNavigationError =
+                                    "navigation_error:"
+                                            + navigation.errorCode()
+                                            + ":"
+                                            + navigation.errorDescription();
+                        } else {
+                            mLastNavigationError = "";
+                        }
+                    }
+                    recordTabSnapshot(tab, "navigation_finished");
+                }
+
+                @Override
+                public void onPageLoadFailed(Tab tab, int errorCode) {
+                    mLastNavigationError = "page_load_failed:" + errorCode;
+                    recordTabSnapshot(tab, "page_load_failed");
+                }
+
+                @Override
+                public void onCrash(Tab tab) {
+                    mLastCrash = "tab_crash:" + System.currentTimeMillis();
+                    mRendererResponsive = false;
+                    recordTabSnapshot(tab, "tab_crash");
+                }
+
+                @Override
+                public void onRendererResponsiveStateChanged(Tab tab, boolean isResponsive) {
+                    mRendererResponsive = isResponsive;
+                    recordTabSnapshot(tab, isResponsive ? "renderer_responsive" : "renderer_unresponsive");
+                }
+            };
+
+    private static final class PendingLaunch {
+        final WeakReference<ChromeTabbedActivity> activity;
+        final String serial;
+        final String hubUrl;
+        final String token;
+        final long createdAt;
+        int attempts;
+
+        PendingLaunch(ChromeTabbedActivity activity, String serial, String hubUrl, String token) {
+            this.activity = new WeakReference<>(activity);
+            this.serial = serial;
+            this.hubUrl = hubUrl;
+            this.token = token;
+            this.createdAt = System.currentTimeMillis();
+        }
+    }
 
     private IptestBridgeClient(
             ChromeTabbedActivity activity, String serial, String hubUrl, String token) {
@@ -86,16 +187,71 @@ public final class IptestBridgeClient {
         if (isBlank(serial) || isBlank(hubUrl) || isBlank(token)) return false;
 
         synchronized (LOCK) {
-            if (sClient != null
-                    && sClient.matches(serial.trim(), hubUrl.trim(), token.trim())) {
-                sClient.updateActivity(activity);
+            String trimmedSerial = serial.trim();
+            String trimmedHubUrl = hubUrl.trim();
+            String trimmedToken = token.trim();
+            if (!isActivityReadyForBridge(activity)) {
+                sPendingLaunch =
+                        new PendingLaunch(activity, trimmedSerial, trimmedHubUrl, trimmedToken);
+                schedulePendingStartLocked();
                 return true;
             }
-            if (sClient != null) sClient.stop();
-            sClient = new IptestBridgeClient(activity, serial.trim(), hubUrl.trim(), token.trim());
-            sClient.start();
+            startOrRefreshLocked(activity, trimmedSerial, trimmedHubUrl, trimmedToken);
         }
         return true;
+    }
+
+    private static void startOrRefreshLocked(
+            ChromeTabbedActivity activity, String serial, String hubUrl, String token) {
+        sPendingLaunch = null;
+        if (sClient != null && sClient.matches(serial, hubUrl, token)) {
+            sClient.updateActivity(activity);
+            sClient.resetAutomationTabBestEffort("activity_refreshed");
+            return;
+        }
+        if (sClient != null) sClient.stop();
+        sClient = new IptestBridgeClient(activity, serial, hubUrl, token);
+        sClient.start();
+    }
+
+    private static void schedulePendingStartLocked() {
+        if (sPendingRetryScheduled) return;
+        sPendingRetryScheduled = true;
+        ThreadUtils.postOnUiThreadDelayed(
+                () -> {
+                    synchronized (LOCK) {
+                        sPendingRetryScheduled = false;
+                        PendingLaunch pending = sPendingLaunch;
+                        if (pending == null) return;
+                        ChromeTabbedActivity activity = pending.activity.get();
+                        long ageMs = System.currentTimeMillis() - pending.createdAt;
+                        if (activity == null || ageMs > START_RETRY_DEADLINE_MS) {
+                            sPendingLaunch = null;
+                            Log.w(TAG, "Dropping pending IP-TEST bridge launch; activityReady=%s ageMs=%d",
+                                    activity != null, ageMs);
+                            return;
+                        }
+                        if (isActivityReadyForBridge(activity)) {
+                            startOrRefreshLocked(
+                                    activity, pending.serial, pending.hubUrl, pending.token);
+                            return;
+                        }
+                        pending.attempts++;
+                        schedulePendingStartLocked();
+                    }
+                },
+                START_RETRY_DELAY_MS);
+    }
+
+    private static boolean isActivityReadyForBridge(ChromeTabbedActivity activity) {
+        try {
+            return activity != null
+                    && activity.didFinishNativeInitialization()
+                    && activity.areTabModelsInitialized()
+                    && activity.getActivityTab() != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private void updateActivity(ChromeTabbedActivity activity) {
@@ -164,7 +320,7 @@ public final class IptestBridgeClient {
         if (payload == null) payload = new JSONObject();
         try {
             Log.i(TAG, "Command start: %s id=%s state=%s", name, id, readActivityState());
-            Object result = executeCommand(name, payload);
+            Object result = executeCommandWithWatchdog(name, payload);
             Log.i(TAG, "Command success: %s id=%s", name, id);
             submitResult(id, true, result, null);
         } catch (Exception e) {
@@ -173,13 +329,70 @@ public final class IptestBridgeClient {
         }
     }
 
+    private Object executeCommandWithWatchdog(String name, JSONObject payload) throws Exception {
+        long timeoutMs = commandTimeoutMs(name, payload);
+        FutureTask<Object> task = new FutureTask<>(() -> executeCommand(name, payload));
+        Thread thread = new Thread(task, "IPTEST-BrowserCommand-" + name);
+        thread.setDaemon(true);
+        thread.start();
+        try {
+            return task.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            task.cancel(true);
+            mRendererResponsive = false;
+            mLastNavigationError = "command_timeout:" + name;
+            resetAutomationTabBestEffort("command_timeout:" + name);
+            throw new IllegalStateException(
+                    "native_command_timeout:" + name + " after " + timeoutMs + "ms " + readActivityState());
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception) throw (Exception) cause;
+            throw new IllegalStateException(cause == null ? e.toString() : cause.toString(), cause);
+        }
+    }
+
+    private long commandTimeoutMs(String name, JSONObject payload) {
+        long requested = payload.optLong("timeoutMs", 0);
+        if (requested > 0) return clamp(requested + 5000, 5000, 60000);
+        switch (name) {
+            case "cleanup":
+                return 40000;
+            case "navigate":
+                return 45000;
+            case "evaluate":
+            case "evaluatePage":
+            case "evaluateInternal":
+                return 20000;
+            case "getNativeState":
+            case "waitForNativeReady":
+            case "resetAutomationTab":
+            case "getBrowserInfo":
+                return 10000;
+            default:
+                return 30000;
+        }
+    }
+
     private Object executeCommand(String name, JSONObject payload) throws Exception {
         addBridgeLog("debug", "command:start", name);
         switch (name) {
             case "navigate":
-                return navigate(payload.optString("url", ""));
+                return navigate(payload);
             case "evaluate":
-                return evaluate(payload.optString("expression", ""), 15000);
+            case "evaluatePage":
+                return evaluatePage(
+                        payload.optString("expression", ""),
+                        payload.optLong("timeoutMs", 15000));
+            case "evaluateInternal":
+                return evaluateInternal(
+                        payload.optString("expression", ""),
+                        payload.optLong("timeoutMs", 8000));
+            case "getNativeState":
+                return getNativeState();
+            case "waitForNativeReady":
+                return waitForNativeReady(payload.optLong("timeoutMs", 15000));
+            case "resetAutomationTab":
+                return resetAutomationTab(payload.optString("reason", "command"));
             case "getPageSnapshot":
                 return getPageSnapshot();
             case "clickSelector":
@@ -215,14 +428,140 @@ public final class IptestBridgeClient {
         }
     }
 
-    private Object navigate(String url) throws Exception {
+    private Object navigate(JSONObject payload) throws Exception {
+        String url = payload.optString("url", "");
         if (isBlank(url)) throw new IllegalArgumentException("navigate url is required");
-        return runWithTab(
-                url,
-                tab -> {
-                    tab.loadUrl(new LoadUrlParams(url));
-                    return new JSONObject().put("ok", true).put("url", url);
+        String waitUntil =
+                payload.optString("waitUntil", "load")
+                        .trim()
+                        .toLowerCase(Locale.US);
+        long timeoutMs = clamp(payload.optLong("timeoutMs", 30000), 1000, 60000);
+        long startedAt = System.currentTimeMillis();
+        waitForNativeReady(Math.min(15000, timeoutMs));
+
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<JSONObject> result = new AtomicReference<>();
+        AtomicReference<String> error = new AtomicReference<>();
+        AtomicReference<Tab> observedTab = new AtomicReference<>();
+        AtomicBoolean done = new AtomicBoolean(false);
+
+        EmptyTabObserver observer =
+                new EmptyTabObserver() {
+                    private void finish(Tab tab, String event, GURL eventUrl) {
+                        if (!done.compareAndSet(false, true)) return;
+                        try {
+                            tab.removeObserver(this);
+                        } catch (Throwable ignored) {
+                        }
+                        try {
+                            String finalUrl =
+                                    eventUrl == null ? safeTabUrl(tab) : String.valueOf(eventUrl);
+                            result.set(
+                                    new JSONObject()
+                                            .put("ok", true)
+                                            .put("url", url)
+                                            .put("finalUrl", finalUrl)
+                                            .put("event", event)
+                                            .put("waitUntil", waitUntil)
+                                            .put("durationMs", System.currentTimeMillis() - startedAt)
+                                            .put("nativeState", collectNativeStateOnUi()));
+                        } catch (Exception jsonError) {
+                            error.set(jsonError.toString());
+                        }
+                        latch.countDown();
+                    }
+
+                    private void fail(Tab tab, String reason) {
+                        if (!done.compareAndSet(false, true)) return;
+                        try {
+                            tab.removeObserver(this);
+                        } catch (Throwable ignored) {
+                        }
+                        error.set(reason + " " + describeTabState(tab));
+                        latch.countDown();
+                    }
+
+                    @Override
+                    public void onDidFinishNavigationInPrimaryMainFrame(
+                            Tab tab, NavigationHandle navigation) {
+                        if (navigation != null
+                                && (navigation.isErrorPage() || navigation.errorCode() != 0)) {
+                            fail(
+                                    tab,
+                                    "navigation_error:"
+                                            + navigation.errorCode()
+                                            + ":"
+                                            + navigation.errorDescription());
+                            return;
+                        }
+                        if ("commit".equals(waitUntil) || "domcontentloaded".equals(waitUntil)) {
+                            finish(tab, "primary_main_frame_finished", navigation == null ? null : navigation.getUrl());
+                        }
+                    }
+
+                    @Override
+                    public void onLoadStopped(Tab tab, boolean toDifferentDocument) {
+                        if ("loadstopped".equals(waitUntil) || "load".equals(waitUntil)) {
+                            finish(tab, "load_stopped", null);
+                        }
+                    }
+
+                    @Override
+                    public void onPageLoadFinished(Tab tab, GURL eventUrl) {
+                        finish(tab, "page_load_finished", eventUrl);
+                    }
+
+                    @Override
+                    public void onPageLoadFailed(Tab tab, int errorCode) {
+                        fail(tab, "page_load_failed:" + errorCode);
+                    }
+
+                    @Override
+                    public void onCrash(Tab tab) {
+                        fail(tab, "tab_crash");
+                    }
+                };
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    try {
+                        ChromeTabbedActivity activity = mActivity.get();
+                        Tab tab = getOrCreateActivityTab(activity, url);
+                        if (tab == null) {
+                            error.set("No current tab " + describeActivityState(activity));
+                            latch.countDown();
+                            return;
+                        }
+                        observedTab.set(tab);
+                        tab.addObserver(observer);
+                        tab.loadUrl(new LoadUrlParams(url));
+                    } catch (Throwable t) {
+                        error.set(t.toString());
+                        latch.countDown();
+                    }
+                    return null;
                 });
+
+        if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+            Tab tab = observedTab.get();
+            if (tab != null) {
+                ThreadUtils.postOnUiThread(() -> {
+                    try {
+                        tab.removeObserver(observer);
+                    } catch (Throwable ignored) {
+                    }
+                });
+            }
+            throw new IllegalStateException(
+                    "native_navigation_timeout:"
+                            + url
+                            + " waitUntil="
+                            + waitUntil
+                            + " "
+                            + readActivityState());
+        }
+        if (!isBlank(error.get())) throw new IllegalStateException(error.get());
+        return result.get();
     }
 
     private Object cleanup() throws Exception {
@@ -232,15 +571,17 @@ public final class IptestBridgeClient {
         boolean nativeOk = profileResult.optBoolean("ok", false);
         boolean pageOk = pageResult.optBoolean("ok", false);
         boolean pageBlocking = pageResult.optBoolean("blocking", false);
+        JSONObject resetResult = resetAutomationTabBestEffort("cleanup");
         JSONObject result =
                 new JSONObject()
-                        .put("ok", nativeOk && (!pageBlocking || pageOk))
+                        .put("ok", nativeOk)
                         .put("mode", "native_profile_plus_page")
                         .put("nativeProfileCleared", nativeOk)
                         .put("pageLevelCleared", pageOk)
                         .put("pageLevelBlocking", pageBlocking)
                         .put("profile", profileResult)
                         .put("page", pageResult)
+                        .put("reset", resetResult)
                         .put("durationMs", System.currentTimeMillis() - startedAt);
         addBridgeLog(result.optBoolean("ok", false) ? "debug" : "warn", "cleanup", result.toString());
         return result;
@@ -288,28 +629,12 @@ public final class IptestBridgeClient {
 
     private JSONObject runPageLevelCleanupBestEffort() {
         try {
-            resetActiveTabToBlank();
-            Object result =
-                    evaluate(
-                            "(function(){"
-                                    + "const out={ok:true,mode:'page_level_best_effort',blocking:false,steps:[],skipped:[]};"
-                                    + "const protocol=location.protocol||'';"
-                                    + "const hasOrigin=protocol==='http:'||protocol==='https:'||protocol==='file:';"
-                                    + "function skip(name,reason){out.skipped.push(name+':'+reason);}"
-                                    + "function fail(key,e){out.ok=false;out[key]=String(e);}"
-                                    + "try{if(hasOrigin&&window.localStorage){localStorage.clear();out.steps.push('localStorage');}else{skip('localStorage','no_origin');}}catch(e){hasOrigin?fail('localStorageError',e):skip('localStorage','no_origin:'+String(e));}"
-                                    + "try{if(hasOrigin&&window.sessionStorage){sessionStorage.clear();out.steps.push('sessionStorage');}else{skip('sessionStorage','no_origin');}}catch(e){hasOrigin?fail('sessionStorageError',e):skip('sessionStorage','no_origin:'+String(e));}"
-                                    + "try{if(hasOrigin){document.cookie.split(';').forEach(function(c){var name=c.replace(/^\\s*/,'').replace(/=.*/,'');if(name){document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain='+location.hostname;}});out.steps.push('cookies');}else{skip('cookies','no_origin');}}catch(e){hasOrigin?fail('cookieError',e):skip('cookies','no_origin:'+String(e));}"
-                                    + "if(!out.ok){out.reason=Object.keys(out).filter(k=>/Error$/.test(k)).map(k=>k+'='+out[k]).join(';')||'page_level_cleanup_failed';}"
-                                    + "return out;"
-                                    + "})()",
-                            5000);
-            if (result instanceof JSONObject) return (JSONObject) result;
             return new JSONObject()
-                    .put("ok", true)
+                    .put("ok", false)
                     .put("blocking", false)
                     .put("mode", "page_level_best_effort")
-                    .put("result", result);
+                    .put("skipped", true)
+                    .put("reason", "native_profile_cleanup_is_blocking_gate");
         } catch (Exception e) {
             addBridgeLog("warn", "cleanup:page_level_skipped", e.toString());
             try {
@@ -346,14 +671,22 @@ public final class IptestBridgeClient {
     }
 
     private Object getPageSnapshot() throws Exception {
-        return evaluate(
+        JSONObject snapshot = new JSONObject().put("nativeState", getNativeState());
+        try {
+            Object page =
+                    evaluateInternal(
                 "(function(){return {url:location.href,title:document.title,readyState:document.readyState,webdriver:navigator.webdriver,userAgent:navigator.userAgent,cookie:document.cookie,localStorageKeys:Object.keys(localStorage||{}),sessionStorageKeys:Object.keys(sessionStorage||{}),viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio||1},bodyTextLength:document.body&&document.body.innerText?document.body.innerText.trim().length:0};})()",
-                8000);
+                            5000);
+            snapshot.put("page", page == null ? JSONObject.NULL : page);
+        } catch (Exception e) {
+            snapshot.put("pageError", e.toString());
+        }
+        return snapshot;
     }
 
     private Object clickSelector(String selector) throws Exception {
         if (isBlank(selector)) throw new IllegalArgumentException("selector is required");
-        return evaluate(
+        return evaluateInternal(
                 "(function(){var el=document.querySelector(" + JSONObject.quote(selector) + ");"
                         + "if(!el)return {found:false};"
                         + "el.scrollIntoView({block:'center',inline:'center'});"
@@ -364,7 +697,7 @@ public final class IptestBridgeClient {
 
     private Object fillSelector(String selector, String value) throws Exception {
         if (isBlank(selector)) throw new IllegalArgumentException("selector is required");
-        return evaluate(
+        return evaluateInternal(
                 "(function(){var el=document.querySelector(" + JSONObject.quote(selector) + ");"
                         + "if(!el)return {found:false};"
                         + "el.focus();"
@@ -397,10 +730,81 @@ public final class IptestBridgeClient {
                 .put("packageName", mPackageName)
                 .put("bridgeVersion", BRIDGE_VERSION)
                 .put("userAgent", System.getProperty("http.agent", ""))
+                .put("nativeState", getNativeState())
                 .put("page", page);
     }
 
-    private Object evaluate(String expression, long timeoutMs) throws Exception {
+    private JSONObject getNativeState() throws Exception {
+        if (ThreadUtils.runningOnUiThread()) {
+            return collectNativeStateOnUi();
+        }
+        return ThreadUtils.runOnUiThreadBlocking(this::collectNativeStateOnUi);
+    }
+
+    private JSONObject waitForNativeReady(long timeoutMs) throws Exception {
+        long deadline = System.currentTimeMillis() + Math.max(1000, timeoutMs);
+        JSONObject lastState = new JSONObject();
+        boolean triedReset = false;
+        while (System.currentTimeMillis() < deadline) {
+            lastState = getNativeState();
+            boolean nativeReady = lastState.optBoolean("nativeReady", false);
+            boolean tabModelsReady = lastState.optBoolean("tabModelsReady", false);
+            boolean readyForCommands = lastState.optBoolean("readyForCommands", false);
+            if (readyForCommands) {
+                lastState.put("ok", true);
+                return lastState;
+            }
+            if (!triedReset && nativeReady && tabModelsReady) {
+                triedReset = true;
+                resetAutomationTabBestEffort("wait_for_native_ready");
+            }
+            sleep(250);
+        }
+        throw new IllegalStateException("native_ready_timeout " + lastState);
+    }
+
+    private JSONObject resetAutomationTab(String reason) throws Exception {
+        JSONObject result =
+                ThreadUtils.runOnUiThreadBlocking(
+                        () -> {
+                            ChromeTabbedActivity activity = mActivity.get();
+                            JSONObject output = new JSONObject();
+                            try {
+                                Tab tab = getOrCreateActivityTab(activity, "about:blank", true);
+                                if (tab == null) {
+                                    return output
+                                            .put("ok", false)
+                                            .put("reason", "no_tab")
+                                            .put("nativeState", collectNativeStateOnUi());
+                                }
+                                tab.loadUrl(new LoadUrlParams("about:blank"));
+                                return output
+                                        .put("ok", true)
+                                        .put("reason", reason)
+                                        .put("automationTabId", mAutomationTabId)
+                                        .put("nativeState", collectNativeStateOnUi());
+                            } catch (Exception e) {
+                                return output.put("ok", false).put("reason", e.toString());
+                            }
+                        });
+        sleep(500);
+        return result;
+    }
+
+    private JSONObject resetAutomationTabBestEffort(String reason) {
+        try {
+            return resetAutomationTab(reason);
+        } catch (Throwable t) {
+            addBridgeLog("warn", "tab:reset_automation_failed", t.toString());
+            try {
+                return new JSONObject().put("ok", false).put("reason", t.toString());
+            } catch (Exception ignored) {
+                return new JSONObject();
+            }
+        }
+    }
+
+    private Object evaluatePage(String expression, long timeoutMs) throws Exception {
         if (isBlank(expression)) throw new IllegalArgumentException("evaluate expression is required");
         waitForWebContents("about:blank", Math.min(Math.max(5000, timeoutMs), 15000));
         long primaryTimeoutMs = Math.min(Math.max(2500, timeoutMs / 3), 5000);
@@ -432,6 +836,19 @@ public final class IptestBridgeClient {
                                 + fallbackError,
                         fallbackError);
             }
+        }
+    }
+
+    private Object evaluateInternal(String expression, long timeoutMs) throws Exception {
+        if (isBlank(expression)) throw new IllegalArgumentException("evaluate expression is required");
+        waitForWebContents("about:blank", Math.min(Math.max(2500, timeoutMs), 10000));
+        try {
+            Object result = evaluateWithMainFrame(expression, timeoutMs);
+            mPreferIsolatedWorldEval = true;
+            return result;
+        } catch (Exception isolatedError) {
+            addBridgeLog("warn", "evaluate_internal:fallback_webcontents", isolatedError.toString());
+            return evaluateWithWebContents(expression, Math.min(Math.max(1000, timeoutMs / 2), 5000));
         }
     }
 
@@ -529,11 +946,24 @@ public final class IptestBridgeClient {
     }
 
     private Tab getOrCreateActivityTab(ChromeTabbedActivity activity, String fallbackUrl) {
+        return getOrCreateActivityTab(activity, fallbackUrl, false);
+    }
+
+    private Tab getOrCreateActivityTab(
+            ChromeTabbedActivity activity, String fallbackUrl, boolean forceNew) {
         if (activity == null) return null;
-        Tab tab = activity.getActivityTab();
-        if (tab != null) return tab;
         if (!activity.didFinishNativeInitialization() || !activity.areTabModelsInitialized()) {
             return null;
+        }
+        Tab tab = forceNew ? null : getAutomationTab(activity);
+        if (isUsableTab(tab)) {
+            attachAutomationObserver(tab);
+            return tab;
+        }
+        tab = forceNew ? null : activity.getActivityTab();
+        if (isUsableTab(tab)) {
+            attachAutomationObserver(tab);
+            return tab;
         }
         try {
             String url = isBlank(fallbackUrl) ? "about:blank" : fallbackUrl;
@@ -544,13 +974,154 @@ public final class IptestBridgeClient {
                                     TabLaunchType.FROM_CHROME_UI,
                                     /* parent= */ null);
             if (tab != null) {
+                attachAutomationObserver(tab);
                 addBridgeLog("debug", "tab:create", url);
                 return tab;
             }
         } catch (Throwable t) {
             addBridgeLog("warn", "tab:create_failed", t.toString());
         }
-        return activity.getActivityTab();
+        tab = activity.getActivityTab();
+        if (isUsableTab(tab)) attachAutomationObserver(tab);
+        return tab;
+    }
+
+    private Tab getAutomationTab(ChromeTabbedActivity activity) {
+        if (activity == null || mAutomationTabId < 0) return null;
+        try {
+            TabModel model = activity.getCurrentTabModel();
+            int index = TabModelUtils.getTabIndexById(model, mAutomationTabId);
+            return index >= 0 ? model.getTabAt(index) : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private void attachAutomationObserver(Tab tab) {
+        if (tab == null) return;
+        try {
+            if (mObservedTab == tab) {
+                mAutomationTabId = tab.getId();
+                recordTabSnapshot(tab, "tab_observed");
+                return;
+            }
+            if (mObservedTab != null) {
+                try {
+                    mObservedTab.removeObserver(mAutomationTabObserver);
+                } catch (Throwable ignored) {
+                }
+            }
+            mObservedTab = tab;
+            mAutomationTabId = tab.getId();
+            tab.addObserver(mAutomationTabObserver);
+            recordTabSnapshot(tab, "tab_observed");
+        } catch (Throwable t) {
+            addBridgeLog("warn", "tab:observe_failed", t.toString());
+        }
+    }
+
+    private void recordTabSnapshot(Tab tab, String event) {
+        if (tab == null) return;
+        try {
+            mLastKnownUrl = safeTabUrl(tab);
+            mLastNavigationEvent = event;
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private JSONObject collectNativeStateOnUi() throws Exception {
+        ChromeTabbedActivity activity = mActivity.get();
+        boolean nativeReady = false;
+        boolean tabModelsReady = false;
+        int tabCount = -1;
+        int activityTabId = -1;
+        Tab tab = null;
+        if (activity != null) {
+            try {
+                nativeReady = activity.didFinishNativeInitialization();
+            } catch (Throwable ignored) {
+            }
+            try {
+                tabModelsReady = activity.areTabModelsInitialized();
+            } catch (Throwable ignored) {
+            }
+            try {
+                if (tabModelsReady) {
+                    TabModel model = activity.getCurrentTabModel();
+                    tabCount = model.getCount();
+                    Tab activityTab = activity.getActivityTab();
+                    activityTabId = activityTab == null ? -1 : activityTab.getId();
+                }
+            } catch (Throwable ignored) {
+            }
+            tab = getAutomationTab(activity);
+            if (tab == null) tab = activity.getActivityTab();
+        }
+        boolean tabInitialized = false;
+        boolean tabDestroyed = false;
+        boolean tabClosing = false;
+        boolean hasWebContents = false;
+        boolean hasMainFrame = false;
+        boolean mainFrameLive = false;
+        String url = "";
+        int tabId = -1;
+        if (tab != null) {
+            tabId = safeTabId(tab);
+            url = safeTabUrl(tab);
+            try {
+                tabInitialized = tab.isInitialized();
+            } catch (Throwable ignored) {
+            }
+            try {
+                tabDestroyed = tab.isDestroyed();
+            } catch (Throwable ignored) {
+            }
+            try {
+                tabClosing = tab.isClosing();
+            } catch (Throwable ignored) {
+            }
+            try {
+                WebContents webContents = tab.getWebContents();
+                hasWebContents = webContents != null;
+                RenderFrameHost mainFrame = webContents == null ? null : webContents.getMainFrame();
+                hasMainFrame = mainFrame != null;
+                mainFrameLive = mainFrame != null && mainFrame.isRenderFrameLive();
+            } catch (Throwable ignored) {
+            }
+        }
+        boolean readyForCommands =
+                nativeReady
+                        && tabModelsReady
+                        && tab != null
+                        && tabInitialized
+                        && !tabDestroyed
+                        && !tabClosing
+                        && hasWebContents
+                        && hasMainFrame
+                        && mainFrameLive;
+        return new JSONObject()
+                .put("nativeReady", nativeReady)
+                .put("tabModelsReady", tabModelsReady)
+                .put("tabCount", tabCount)
+                .put("activityTabId", activityTabId)
+                .put("automationTabId", mAutomationTabId)
+                .put("tabId", tabId)
+                .put("url", url)
+                .put("lastKnownUrl", mLastKnownUrl)
+                .put("tabInitialized", tabInitialized)
+                .put("tabDestroyed", tabDestroyed)
+                .put("tabClosing", tabClosing)
+                .put("hasWebContents", hasWebContents)
+                .put("hasMainFrame", hasMainFrame)
+                .put("mainFrameLive", mainFrameLive)
+                .put("rendererResponsive", mRendererResponsive)
+                .put("lastLoadStopped", mLastLoadStoppedAt)
+                .put("lastPageLoadFinished", mLastPageLoadFinishedAt)
+                .put("lastNavigationFinished", mLastNavigationFinishedAt)
+                .put("lastNavigationEvent", mLastNavigationEvent)
+                .put("lastNavigationError", mLastNavigationError)
+                .put("lastCrash", mLastCrash)
+                .put("readyForCommands", readyForCommands);
     }
 
     private String describeActivityState(ChromeTabbedActivity activity) {
@@ -606,6 +1177,30 @@ public final class IptestBridgeClient {
         return webContents != null && mainFrame != null && mainFrame.isRenderFrameLive();
     }
 
+    private boolean isUsableTab(Tab tab) {
+        try {
+            return tab != null && tab.isInitialized() && !tab.isDestroyed() && !tab.isClosing();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private int safeTabId(Tab tab) {
+        try {
+            return tab == null ? -1 : tab.getId();
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private String safeTabUrl(Tab tab) {
+        try {
+            return tab == null ? "" : String.valueOf(tab.getUrl());
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
     private String describeTabState(Tab tab) {
         if (tab == null) return "tab=null";
         boolean initialized = false;
@@ -656,7 +1251,7 @@ public final class IptestBridgeClient {
     }
 
     private <T> T runWithTab(String fallbackUrl, TabCallable<T> callable) throws Exception {
-        waitForWebContents(fallbackUrl, 15000);
+        waitForNativeReady(15000);
         AtomicReference<Exception> error = new AtomicReference<>();
         T result =
                 ThreadUtils.runOnUiThreadBlocking(
@@ -768,6 +1363,10 @@ public final class IptestBridgeClient {
 
     private static boolean isBlank(String value) {
         return value == null || value.trim().isEmpty();
+    }
+
+    private static long clamp(long value, long min, long max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     private static void sleep(long ms) {

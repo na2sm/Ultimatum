@@ -45,6 +45,10 @@ class BrowserGpuChannelHostFactory : public gpu::GpuChannelEstablishFactory {
   // timeouts while backgrounded.
   void SetApplicationVisible(bool is_visible);
 
+  // IP-TEST browser build: treat Android GPU channel timeouts as recoverable so
+  // native automation can recreate the tab/browser instead of losing the process.
+  void GpuChannelTimedOutForIptest();
+
   // Overridden from gpu::GpuChannelEstablishFactory:
   // The factory will return a null GpuChannelHost in the callback during
   // shutdown.
