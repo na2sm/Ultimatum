@@ -522,7 +522,7 @@ public final class IptestBridgeClient {
                     }
                 };
 
-        ThreadUtils.runOnUiThreadBlocking(
+        Runnable startNavigation =
                 () -> {
                     try {
                         ChromeTabbedActivity activity = mActivity.get();
@@ -539,8 +539,8 @@ public final class IptestBridgeClient {
                         error.set(t.toString());
                         latch.countDown();
                     }
-                    return null;
-                });
+                };
+        ThreadUtils.runOnUiThreadBlocking(startNavigation);
 
         if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS)) {
             Tab tab = observedTab.get();
