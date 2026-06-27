@@ -228,19 +228,21 @@ public final class IptestBridgeClient {
     private Object cleanup() throws Exception {
         long startedAt = System.currentTimeMillis();
         JSONObject profileResult = clearNativeProfileData();
-        JSONObject pageResult = runPageLevelCleanup();
+        JSONObject pageResult = runPageLevelCleanupBestEffort();
         boolean nativeOk = profileResult.optBoolean("ok", false);
         boolean pageOk = pageResult.optBoolean("ok", false);
+        boolean pageBlocking = pageResult.optBoolean("blocking", false);
         JSONObject result =
                 new JSONObject()
-                        .put("ok", nativeOk && pageOk)
+                        .put("ok", nativeOk && (!pageBlocking || pageOk))
                         .put("mode", "native_profile_plus_page")
                         .put("nativeProfileCleared", nativeOk)
                         .put("pageLevelCleared", pageOk)
+                        .put("pageLevelBlocking", pageBlocking)
                         .put("profile", profileResult)
                         .put("page", pageResult)
                         .put("durationMs", System.currentTimeMillis() - startedAt);
-        addBridgeLog(nativeOk && pageOk ? "debug" : "warn", "cleanup", result.toString());
+        addBridgeLog(result.optBoolean("ok", false) ? "debug" : "warn", "cleanup", result.toString());
         return result;
     }
 
@@ -284,27 +286,63 @@ public final class IptestBridgeClient {
         return new JSONObject().put("ok", true).put("dataTypes", "history,site_data,cache,form_data,site_settings");
     }
 
-    private JSONObject runPageLevelCleanup() throws Exception {
-        Object result =
-                evaluate(
-                        "(async function(){"
-                                + "const out={ok:true,mode:'page_level',steps:[],skipped:[]};"
-                                + "const protocol=location.protocol||'';"
-                                + "const hasOrigin=protocol==='http:'||protocol==='https:'||protocol==='file:';"
-                                + "function skip(name,reason){out.skipped.push(name+':'+reason);}"
-                                + "function fail(key,e){out.ok=false;out[key]=String(e);}"
-                                + "try{if(hasOrigin&&window.localStorage){localStorage.clear();out.steps.push('localStorage');}else{skip('localStorage','no_origin');}}catch(e){hasOrigin?fail('localStorageError',e):skip('localStorage','no_origin:'+String(e));}"
-                                + "try{if(hasOrigin&&window.sessionStorage){sessionStorage.clear();out.steps.push('sessionStorage');}else{skip('sessionStorage','no_origin');}}catch(e){hasOrigin?fail('sessionStorageError',e):skip('sessionStorage','no_origin:'+String(e));}"
-                                + "try{if(hasOrigin){document.cookie.split(';').forEach(function(c){var name=c.replace(/^\\s*/,'').replace(/=.*/,'');if(name){document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain='+location.hostname;}});out.steps.push('cookies');}else{skip('cookies','no_origin');}}catch(e){hasOrigin?fail('cookieError',e):skip('cookies','no_origin:'+String(e));}"
-                                + "try{if(hasOrigin&&'caches' in window){const keys=await caches.keys();await Promise.all(keys.map(k=>caches.delete(k)));out.cacheKeysDeleted=keys.length;out.steps.push('cacheStorage');}else{skip('cacheStorage',hasOrigin?'unsupported':'no_origin');}}catch(e){hasOrigin?fail('cacheStorageError',e):skip('cacheStorage','no_origin:'+String(e));}"
-                                + "try{if(hasOrigin&&navigator.serviceWorker&&navigator.serviceWorker.getRegistrations){const regs=await navigator.serviceWorker.getRegistrations();await Promise.all(regs.map(r=>r.unregister()));out.serviceWorkersUnregistered=regs.length;out.steps.push('serviceWorkers');}else{skip('serviceWorkers',hasOrigin?'unsupported':'no_origin');}}catch(e){hasOrigin?fail('serviceWorkerError',e):skip('serviceWorkers','no_origin:'+String(e));}"
-                                + "try{if(hasOrigin&&'indexedDB' in window&&indexedDB&&indexedDB.databases){const dbs=await indexedDB.databases();await Promise.all(dbs.filter(db=>db&&db.name).map(db=>new Promise(resolve=>{const req=indexedDB.deleteDatabase(db.name);req.onsuccess=req.onerror=req.onblocked=function(){resolve();};})));out.indexedDbsDeleted=dbs.filter(db=>db&&db.name).length;out.steps.push('indexedDB');}else{skip('indexedDB',hasOrigin?'unsupported':'no_origin');}}catch(e){hasOrigin?fail('indexedDbError',e):skip('indexedDB','no_origin:'+String(e));}"
-                                + "if(!out.ok){out.reason=Object.keys(out).filter(k=>/Error$/.test(k)).map(k=>k+'='+out[k]).join(';')||'page_level_cleanup_failed';}"
-                                + "return out;"
-                                + "})()",
-                        20000);
-        if (result instanceof JSONObject) return (JSONObject) result;
-        return new JSONObject().put("ok", true).put("result", result);
+    private JSONObject runPageLevelCleanupBestEffort() {
+        try {
+            resetActiveTabToBlank();
+            Object result =
+                    evaluate(
+                            "(function(){"
+                                    + "const out={ok:true,mode:'page_level_best_effort',blocking:false,steps:[],skipped:[]};"
+                                    + "const protocol=location.protocol||'';"
+                                    + "const hasOrigin=protocol==='http:'||protocol==='https:'||protocol==='file:';"
+                                    + "function skip(name,reason){out.skipped.push(name+':'+reason);}"
+                                    + "function fail(key,e){out.ok=false;out[key]=String(e);}"
+                                    + "try{if(hasOrigin&&window.localStorage){localStorage.clear();out.steps.push('localStorage');}else{skip('localStorage','no_origin');}}catch(e){hasOrigin?fail('localStorageError',e):skip('localStorage','no_origin:'+String(e));}"
+                                    + "try{if(hasOrigin&&window.sessionStorage){sessionStorage.clear();out.steps.push('sessionStorage');}else{skip('sessionStorage','no_origin');}}catch(e){hasOrigin?fail('sessionStorageError',e):skip('sessionStorage','no_origin:'+String(e));}"
+                                    + "try{if(hasOrigin){document.cookie.split(';').forEach(function(c){var name=c.replace(/^\\s*/,'').replace(/=.*/,'');if(name){document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';document.cookie=name+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/;domain='+location.hostname;}});out.steps.push('cookies');}else{skip('cookies','no_origin');}}catch(e){hasOrigin?fail('cookieError',e):skip('cookies','no_origin:'+String(e));}"
+                                    + "if(!out.ok){out.reason=Object.keys(out).filter(k=>/Error$/.test(k)).map(k=>k+'='+out[k]).join(';')||'page_level_cleanup_failed';}"
+                                    + "return out;"
+                                    + "})()",
+                            5000);
+            if (result instanceof JSONObject) return (JSONObject) result;
+            return new JSONObject()
+                    .put("ok", true)
+                    .put("blocking", false)
+                    .put("mode", "page_level_best_effort")
+                    .put("result", result);
+        } catch (Exception e) {
+            addBridgeLog("warn", "cleanup:page_level_skipped", e.toString());
+            try {
+                return new JSONObject()
+                        .put("ok", false)
+                        .put("blocking", false)
+                        .put("mode", "page_level_best_effort")
+                        .put("skipped", true)
+                        .put("reason", e.toString());
+            } catch (Exception ignored) {
+                return new JSONObject();
+            }
+        }
+    }
+
+    private void resetActiveTabToBlank() {
+        try {
+            ThreadUtils.runOnUiThreadBlocking(
+                    () -> {
+                        try {
+                            ChromeTabbedActivity activity = mActivity.get();
+                            Tab tab = getOrCreateActivityTab(activity, "about:blank");
+                            if (tab != null) {
+                                tab.loadUrl(new LoadUrlParams("about:blank"));
+                            }
+                        } catch (Throwable t) {
+                            addBridgeLog("warn", "tab:reset_blank_failed", t.toString());
+                        }
+                    });
+            sleep(750);
+        } catch (Throwable t) {
+            addBridgeLog("warn", "tab:reset_blank_failed", t.toString());
+        }
     }
 
     private Object getPageSnapshot() throws Exception {
