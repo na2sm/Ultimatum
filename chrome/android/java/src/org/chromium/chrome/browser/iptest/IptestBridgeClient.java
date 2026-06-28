@@ -18,6 +18,7 @@ import org.chromium.chrome.browser.tab.EmptyTabObserver;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tab.TabLaunchType;
 import org.chromium.chrome.browser.tab.TabSelectionType;
+import org.chromium.chrome.browser.tabmodel.TabClosureParams;
 import org.chromium.chrome.browser.tabmodel.TabModel;
 import org.chromium.chrome.browser.tabmodel.TabModelUtils;
 import org.chromium.chrome.browser.browsing_data.TimePeriod;
@@ -906,10 +907,13 @@ public final class IptestBridgeClient {
                                             .put("reason", "no_tab")
                                             .put("nativeState", collectNativeStateOnUi());
                                 }
+                                int closedTabs = closeOtherRegularTabs(activity, tab.getId());
+                                activateAutomationTab(activity, tab);
                                 tab.loadUrl(new LoadUrlParams("about:blank"));
                                 return output
                                         .put("ok", true)
                                         .put("reason", reason)
+                                        .put("closedTabs", closedTabs)
                                         .put("automationTabId", mAutomationTabId)
                                         .put("nativeState", collectNativeStateOnUi());
                             } catch (Exception e) {
@@ -1100,9 +1104,36 @@ public final class IptestBridgeClient {
         } catch (Throwable t) {
             addBridgeLog("warn", "tab:create_failed", t.toString());
         }
+        if (forceNew) return null;
         tab = activity.getActivityTab();
         if (isUsableTab(tab)) attachAutomationObserver(tab);
         return tab;
+    }
+
+    private int closeOtherRegularTabs(ChromeTabbedActivity activity, int keepTabId) {
+        if (activity == null || keepTabId < 0) return 0;
+        try {
+            TabModel model = activity.getTabModelSelector().getModel(false);
+            List<Tab> staleTabs = new ArrayList<>();
+            for (int i = model.getCount() - 1; i >= 0; i--) {
+                Tab candidate = model.getTabAt(i);
+                if (candidate == null || candidate.getId() == keepTabId) continue;
+                if (candidate.isClosing() || candidate.isDestroyed()) continue;
+                staleTabs.add(candidate);
+            }
+            if (staleTabs.isEmpty()) return 0;
+            model.getTabRemover()
+                    .forceCloseTabs(
+                            TabClosureParams.closeTabs(staleTabs)
+                                    .allowUndo(false)
+                                    .saveToTabRestoreService(false)
+                                    .build());
+            addBridgeLog("info", "tab:closed_stale_regular_tabs", String.valueOf(staleTabs.size()));
+            return staleTabs.size();
+        } catch (Throwable t) {
+            addBridgeLog("warn", "tab:close_stale_failed", t.toString());
+            return 0;
+        }
     }
 
     private Tab getAutomationTab(ChromeTabbedActivity activity) {
