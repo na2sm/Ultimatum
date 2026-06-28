@@ -16,6 +16,7 @@ import org.chromium.chrome.browser.profiles.Profile;
 import org.chromium.chrome.browser.tab.EmptyTabObserver;
 import org.chromium.chrome.browser.tab.Tab;
 import org.chromium.chrome.browser.tab.TabLaunchType;
+import org.chromium.chrome.browser.tab.TabSelectionType;
 import org.chromium.chrome.browser.tabmodel.TabModel;
 import org.chromium.chrome.browser.tabmodel.TabModelUtils;
 import org.chromium.chrome.browser.browsing_data.TimePeriod;
@@ -958,15 +959,18 @@ public final class IptestBridgeClient {
         Tab tab = forceNew ? null : getAutomationTab(activity);
         if (isUsableTab(tab)) {
             attachAutomationObserver(tab);
+            activateAutomationTab(activity, tab);
             return tab;
         }
         tab = forceNew ? null : activity.getActivityTab();
         if (isUsableTab(tab)) {
             attachAutomationObserver(tab);
+            activateAutomationTab(activity, tab);
             return tab;
         }
         try {
             String url = isBlank(fallbackUrl) ? "about:blank" : fallbackUrl;
+            activity.getTabModelSelector().selectModel(false);
             tab =
                     activity.getTabCreator(false)
                             .createNewTab(
@@ -975,6 +979,7 @@ public final class IptestBridgeClient {
                                     /* parent= */ null);
             if (tab != null) {
                 attachAutomationObserver(tab);
+                activateAutomationTab(activity, tab);
                 addBridgeLog("debug", "tab:create", url);
                 return tab;
             }
@@ -989,11 +994,28 @@ public final class IptestBridgeClient {
     private Tab getAutomationTab(ChromeTabbedActivity activity) {
         if (activity == null || mAutomationTabId < 0) return null;
         try {
-            TabModel model = activity.getCurrentTabModel();
+            TabModel model = activity.getTabModelSelector().getModel(false);
             int index = TabModelUtils.getTabIndexById(model, mAutomationTabId);
             return index >= 0 ? model.getTabAt(index) : null;
         } catch (Throwable ignored) {
             return null;
+        }
+    }
+
+    private boolean activateAutomationTab(ChromeTabbedActivity activity, Tab tab) {
+        if (activity == null || tab == null) return false;
+        try {
+            activity.getTabModelSelector().selectModel(false);
+            TabModel model = activity.getTabModelSelector().getModel(false);
+            int index = TabModelUtils.getTabIndexById(model, tab.getId());
+            if (index < 0) return false;
+            if (model.index() != index) {
+                model.setIndex(index, TabSelectionType.FROM_USER);
+            }
+            return activity.getActivityTab() != null && activity.getActivityTab().getId() == tab.getId();
+        } catch (Throwable t) {
+            addBridgeLog("warn", "tab:activate_failed", t.toString());
+            return false;
         }
     }
 
@@ -1047,7 +1069,7 @@ public final class IptestBridgeClient {
             }
             try {
                 if (tabModelsReady) {
-                    TabModel model = activity.getCurrentTabModel();
+                    TabModel model = activity.getTabModelSelector().getModel(false);
                     tabCount = model.getCount();
                     Tab activityTab = activity.getActivityTab();
                     activityTabId = activityTab == null ? -1 : activityTab.getId();
@@ -1096,6 +1118,7 @@ public final class IptestBridgeClient {
                         && tabInitialized
                         && !tabDestroyed
                         && !tabClosing
+                        && activityTabId == tabId
                         && hasWebContents
                         && hasMainFrame
                         && mainFrameLive;
