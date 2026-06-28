@@ -748,7 +748,10 @@ public class ChromeTabbedActivity extends ChromeActivity implements PreAttachInt
     @Override
     protected @LaunchIntentDispatcher.Action int maybeDispatchLaunchIntent(
             Intent intent, Bundle savedInstanceState) {
-        IptestBridgeClient.maybeStartFromIntent(this, intent);
+        if (IptestBridgeClient.maybeStartFromIntent(this, intent)) {
+            replaceCurrentIntentWithMainLaunchIntent();
+            return LaunchIntentDispatcher.Action.CONTINUE;
+        }
         // Detect if incoming intent is a result of Chrome recreating itself. For now, restrict this
         // path to reparenting to ensure the launching logic isn't disrupted.
         if (savedInstanceState != null
@@ -1769,7 +1772,10 @@ public class ChromeTabbedActivity extends ChromeActivity implements PreAttachInt
             TraceEvent.begin("ChromeTabbedActivity.onNewIntentWithNative");
 
             super.onNewIntentWithNative(intent);
-            IptestBridgeClient.maybeStartFromIntent(this, intent);
+            if (IptestBridgeClient.maybeStartFromIntent(this, intent)) {
+                replaceCurrentIntentWithMainLaunchIntent();
+                return;
+            }
             if (!IntentHandler.shouldIgnoreIntent(intent, this, /* isCustomTab= */ false)) {
                 maybeHandleOpenTabGroupIntent(intent);
                 maybeHandleUrlIntent(intent);
@@ -1788,6 +1794,14 @@ public class ChromeTabbedActivity extends ChromeActivity implements PreAttachInt
         } finally {
             TraceEvent.end("ChromeTabbedActivity.onNewIntentWithNative");
         }
+    }
+
+    private void replaceCurrentIntentWithMainLaunchIntent() {
+        Intent consumedIntent = new Intent(Intent.ACTION_MAIN);
+        consumedIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+        consumedIntent.setClass(this, getClass());
+        setIntent(consumedIntent);
+        mShouldIgnoreIntent = null;
     }
 
     /**

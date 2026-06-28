@@ -42,6 +42,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.FutureTask;
@@ -553,6 +554,9 @@ public final class IptestBridgeClient {
                     }
                 });
             }
+            JSONObject syntheticResult =
+                    synthesizeNavigationResultIfUrlCommitted(tab, url, waitUntil, startedAt);
+            if (syntheticResult != null) return syntheticResult;
             throw new IllegalStateException(
                     "native_navigation_timeout:"
                             + url
@@ -563,6 +567,46 @@ public final class IptestBridgeClient {
         }
         if (!isBlank(error.get())) throw new IllegalStateException(error.get());
         return result.get();
+    }
+
+    private JSONObject synthesizeNavigationResultIfUrlCommitted(
+            Tab tab, String expectedUrl, String waitUntil, long startedAt) {
+        if (tab == null) return null;
+        try {
+            Callable<JSONObject> fallbackCheck =
+                    () -> {
+                        ChromeTabbedActivity activity = mActivity.get();
+                        activateAutomationTab(activity, tab);
+                        if (!isUsableTab(tab) || !isTabReadyForJs(tab)) return null;
+                        String finalUrl = safeTabUrl(tab);
+                        if (!urlMatches(finalUrl, expectedUrl)
+                                && !urlMatches(mLastKnownUrl, expectedUrl)) {
+                            return null;
+                        }
+                        boolean stillLoading = false;
+                        try {
+                            stillLoading = tab.isLoading();
+                        } catch (Throwable ignored) {
+                        }
+                        if (stillLoading
+                                && ("load".equals(waitUntil)
+                                        || "loadstopped".equals(waitUntil))) {
+                            return null;
+                        }
+                        return new JSONObject()
+                                .put("ok", true)
+                                .put("url", expectedUrl)
+                                .put("finalUrl", finalUrl)
+                                .put("event", "url_committed_fallback")
+                                .put("waitUntil", waitUntil)
+                                .put("durationMs", System.currentTimeMillis() - startedAt)
+                                .put("nativeState", collectNativeStateOnUi());
+                    };
+            return ThreadUtils.runOnUiThreadBlocking(fallbackCheck);
+        } catch (Throwable t) {
+            addBridgeLog("warn", "navigate:fallback_failed", t.toString());
+            return null;
+        }
     }
 
     private Object cleanup() throws Exception {
@@ -1222,6 +1266,13 @@ public final class IptestBridgeClient {
         } catch (Throwable ignored) {
             return "";
         }
+    }
+
+    private boolean urlMatches(String observed, String expected) {
+        if (isBlank(observed) || isBlank(expected)) return false;
+        return observed.equals(expected)
+                || observed.contains(expected)
+                || observed.equals("GURL(" + expected + ")");
     }
 
     private String describeTabState(Tab tab) {
