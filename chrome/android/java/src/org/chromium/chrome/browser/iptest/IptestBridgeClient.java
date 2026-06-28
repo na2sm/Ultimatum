@@ -514,15 +514,20 @@ public final class IptestBridgeClient {
 
                     @Override
                     public void onPageLoadStarted(Tab tab, GURL eventUrl) {
-                        // This callback reports the committed target URL. For IP-TEST automation
-                        // that is the reliable native navigation gate; page readiness is tested by
-                        // later page commands with their own watchdogs.
-                        finishIfUrlMatches(tab, "page_load_started_committed", eventUrl);
+                        // This callback is only a URL commit signal. Returning for
+                        // domcontentloaded/load here lets the HUB issue JS commands while the
+                        // renderer is still accepting the navigation, which made the first
+                        // waitForSelector/click hang on Moto e15.
+                        if ("commit".equals(waitUntil)) {
+                            finishIfUrlMatches(tab, "page_load_started_committed", eventUrl);
+                        }
                     }
 
                     @Override
                     public void onUrlUpdated(Tab tab) {
-                        finishIfUrlMatches(tab, "url_updated_committed", null);
+                        if ("commit".equals(waitUntil)) {
+                            finishIfUrlMatches(tab, "url_updated_committed", null);
+                        }
                     }
 
                     @Override
@@ -539,20 +544,23 @@ public final class IptestBridgeClient {
                             return;
                         }
                         if ("commit".equals(waitUntil) || "domcontentloaded".equals(waitUntil)) {
-                            finish(tab, "primary_main_frame_finished", navigation == null ? null : navigation.getUrl());
+                            finishIfUrlMatches(
+                                    tab,
+                                    "primary_main_frame_finished",
+                                    navigation == null ? null : navigation.getUrl());
                         }
                     }
 
                     @Override
                     public void onLoadStopped(Tab tab, boolean toDifferentDocument) {
                         if ("loadstopped".equals(waitUntil) || "load".equals(waitUntil)) {
-                            finish(tab, "load_stopped", null);
+                            finishIfUrlMatches(tab, "load_stopped", null);
                         }
                     }
 
                     @Override
                     public void onPageLoadFinished(Tab tab, GURL eventUrl) {
-                        finish(tab, "page_load_finished", eventUrl);
+                        finishIfUrlMatches(tab, "page_load_finished", eventUrl);
                     }
 
                     @Override
@@ -611,6 +619,8 @@ public final class IptestBridgeClient {
         JSONObject output = result.get();
         if (output != null && "aborted_after_commit".equals(output.optString("event", ""))) {
             sleep(750);
+        } else if (output != null && "domcontentloaded".equals(output.optString("waitUntil", ""))) {
+            sleep(500);
         }
         return output;
     }
