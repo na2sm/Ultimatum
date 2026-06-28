@@ -488,6 +488,10 @@ public final class IptestBridgeClient {
                     }
 
                     private void fail(Tab tab, String reason) {
+                        if (isBenignNavigationAbortAfterCommit(reason, tab, url)) {
+                            finish(tab, "aborted_after_commit", null);
+                            return;
+                        }
                         if (!done.compareAndSet(false, true)) return;
                         try {
                             tab.removeObserver(this);
@@ -604,7 +608,27 @@ public final class IptestBridgeClient {
                             + readActivityState());
         }
         if (!isBlank(error.get())) throw new IllegalStateException(error.get());
-        return result.get();
+        JSONObject output = result.get();
+        if (output != null && "aborted_after_commit".equals(output.optString("event", ""))) {
+            sleep(750);
+        }
+        return output;
+    }
+
+    private boolean isBenignNavigationAbortAfterCommit(String reason, Tab tab, String expectedUrl) {
+        if (isBlank(reason) || isBlank(expectedUrl)) return false;
+        boolean aborted =
+                reason.startsWith("navigation_error:-3:")
+                        || reason.startsWith("page_load_failed:-3");
+        if (!aborted) return false;
+        String tabUrl = safeTabUrl(tab);
+        boolean committed =
+                urlMatches(tabUrl, expectedUrl) || urlMatches(mLastKnownUrl, expectedUrl);
+        if (committed) {
+            mLastNavigationError = "";
+            addBridgeLog("debug", "navigate:aborted_after_commit", reason);
+        }
+        return committed;
     }
 
     private JSONObject synthesizeNavigationResultIfUrlCommitted(
@@ -901,6 +925,7 @@ public final class IptestBridgeClient {
                 mPreferIsolatedWorldEval = true;
                 return result;
             } catch (Exception fallbackError) {
+                resetAutomationTabBestEffort("evaluate_failed");
                 throw new IllegalStateException(
                         "evaluate failed; webContents="
                                 + primaryError
@@ -920,7 +945,12 @@ public final class IptestBridgeClient {
             return result;
         } catch (Exception isolatedError) {
             addBridgeLog("warn", "evaluate_internal:fallback_webcontents", isolatedError.toString());
-            return evaluateWithWebContents(expression, Math.min(Math.max(1000, timeoutMs / 2), 5000));
+            try {
+                return evaluateWithWebContents(expression, Math.min(Math.max(1000, timeoutMs / 2), 5000));
+            } catch (Exception webContentsError) {
+                resetAutomationTabBestEffort("evaluate_internal_failed");
+                throw webContentsError;
+            }
         }
     }
 
