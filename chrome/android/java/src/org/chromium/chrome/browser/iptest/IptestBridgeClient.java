@@ -936,36 +936,16 @@ public final class IptestBridgeClient {
     private Object evaluatePage(String expression, long timeoutMs) throws Exception {
         if (isBlank(expression)) throw new IllegalArgumentException("evaluate expression is required");
         waitForWebContents("about:blank", Math.min(Math.max(5000, timeoutMs), 15000));
-        long primaryTimeoutMs = Math.min(Math.max(2500, timeoutMs / 3), 5000);
-        if (mPreferIsolatedWorldEval) {
-            try {
-                return evaluateWithMainFrame(expression, timeoutMs);
-            } catch (Exception isolatedError) {
-                mPreferIsolatedWorldEval = false;
-                addBridgeLog("warn", "evaluate:fallback_webcontents", isolatedError.toString());
-                return evaluateWithWebContents(expression, primaryTimeoutMs);
-            }
-        }
         try {
-            Object result = evaluateWithWebContents(expression, primaryTimeoutMs);
-            mPreferIsolatedWorldEval = false;
+            Object result = evaluateWithMainFrame(expression, timeoutMs);
+            mPreferIsolatedWorldEval = true;
             return result;
-        } catch (Exception primaryError) {
-            addBridgeLog("warn", "evaluate:fallback_isolated_world", primaryError.toString());
-            try {
-                Object result =
-                        evaluateWithMainFrame(expression, Math.max(1000, timeoutMs - primaryTimeoutMs));
-                mPreferIsolatedWorldEval = true;
-                return result;
-            } catch (Exception fallbackError) {
-                resetAutomationTabBestEffort("evaluate_failed");
-                throw new IllegalStateException(
-                        "evaluate failed; webContents="
-                                + primaryError
-                                + "; mainFrame="
-                                + fallbackError,
-                        fallbackError);
-            }
+        } catch (Exception isolatedError) {
+            addBridgeLog("warn", "evaluate:isolated_world_failed", isolatedError.toString());
+            resetAutomationTabBestEffort("evaluate_failed");
+            throw new IllegalStateException(
+                    "evaluate failed; mainFrame=" + isolatedError,
+                    isolatedError);
         }
     }
 
