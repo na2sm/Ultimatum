@@ -67,9 +67,12 @@ public final class IptestBridgeClient {
     private static final String TAG = "IptestBridgeClient";
     private static final String BRIDGE_VERSION = "native-v1";
     private static final String SWITCH_IN_PROCESS_GPU = "in-process-gpu";
+    private static final String SWITCH_SINGLE_PROCESS = "single-process";
+    private static final String SWITCH_RENDERER_PROCESS_LIMIT = "renderer-process-limit";
     private static final Object LOCK = new Object();
     private static final long START_RETRY_DELAY_MS = 300;
     private static final long START_RETRY_DEADLINE_MS = 60000;
+    private static final long NAVIGATION_COMMITTED_SETTLE_MS = 2500;
 
     private static IptestBridgeClient sClient;
     private static PendingLaunch sPendingLaunch;
@@ -211,6 +214,12 @@ public final class IptestBridgeClient {
             CommandLine commandLine = CommandLine.getInstance();
             if (!commandLine.hasSwitch(SWITCH_IN_PROCESS_GPU)) {
                 commandLine.appendSwitch(SWITCH_IN_PROCESS_GPU);
+            }
+            if (!commandLine.hasSwitch(SWITCH_SINGLE_PROCESS)) {
+                commandLine.appendSwitch(SWITCH_SINGLE_PROCESS);
+            }
+            if (!commandLine.hasSwitch(SWITCH_RENDERER_PROCESS_LIMIT)) {
+                commandLine.appendSwitchWithValue(SWITCH_RENDERER_PROCESS_LIMIT, "1");
             }
         } catch (Throwable t) {
             Log.w(TAG, "Failed to apply IP-TEST command line switches", t);
@@ -512,14 +521,26 @@ public final class IptestBridgeClient {
                         finish(tab, event, eventUrl);
                     }
 
+                    private void finishAfterSettledCommit(Tab tab, String event, GURL eventUrl) {
+                        String eventUrlString = eventUrl == null ? "" : String.valueOf(eventUrl);
+                        String tabUrl = safeTabUrl(tab);
+                        if (!urlMatches(eventUrlString, url)
+                                && !urlMatches(tabUrl, url)
+                                && !urlMatches(mLastKnownUrl, url)) {
+                            return;
+                        }
+                        ThreadUtils.postOnUiThreadDelayed(
+                                () -> finishIfUrlMatches(tab, event, eventUrl),
+                                NAVIGATION_COMMITTED_SETTLE_MS);
+                    }
+
                     @Override
                     public void onPageLoadStarted(Tab tab, GURL eventUrl) {
-                        // This callback is only a URL commit signal. Returning for
-                        // domcontentloaded/load here lets the HUB issue JS commands while the
-                        // renderer is still accepting the navigation, which made the first
-                        // waitForSelector/click hang on Moto e15.
                         if ("commit".equals(waitUntil)) {
                             finishIfUrlMatches(tab, "page_load_started_committed", eventUrl);
+                        } else if ("domcontentloaded".equals(waitUntil)) {
+                            finishAfterSettledCommit(
+                                    tab, "page_load_started_committed_settled", eventUrl);
                         }
                     }
 
@@ -527,6 +548,8 @@ public final class IptestBridgeClient {
                     public void onUrlUpdated(Tab tab) {
                         if ("commit".equals(waitUntil)) {
                             finishIfUrlMatches(tab, "url_updated_committed", null);
+                        } else if ("domcontentloaded".equals(waitUntil)) {
+                            finishAfterSettledCommit(tab, "url_updated_committed_settled", null);
                         }
                     }
 
