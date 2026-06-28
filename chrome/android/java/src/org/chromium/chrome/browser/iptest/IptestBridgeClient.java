@@ -7,6 +7,7 @@ package org.chromium.chrome.browser.iptest;
 import android.content.Context;
 import android.content.Intent;
 
+import org.chromium.base.CommandLine;
 import org.chromium.base.Log;
 import org.chromium.base.ThreadUtils;
 import org.chromium.chrome.browser.browsing_data.BrowsingDataBridge;
@@ -65,6 +66,7 @@ public final class IptestBridgeClient {
 
     private static final String TAG = "IptestBridgeClient";
     private static final String BRIDGE_VERSION = "native-v1";
+    private static final String SWITCH_IN_PROCESS_GPU = "in-process-gpu";
     private static final Object LOCK = new Object();
     private static final long START_RETRY_DELAY_MS = 300;
     private static final long START_RETRY_DEADLINE_MS = 60000;
@@ -187,6 +189,7 @@ public final class IptestBridgeClient {
         String hubUrl = intent.getStringExtra(EXTRA_HUB_URL);
         String token = intent.getStringExtra(EXTRA_TOKEN);
         if (isBlank(serial) || isBlank(hubUrl) || isBlank(token)) return false;
+        ensureIptestCommandLineSwitches();
 
         synchronized (LOCK) {
             String trimmedSerial = serial.trim();
@@ -201,6 +204,17 @@ public final class IptestBridgeClient {
             startOrRefreshLocked(activity, trimmedSerial, trimmedHubUrl, trimmedToken);
         }
         return true;
+    }
+
+    private static void ensureIptestCommandLineSwitches() {
+        try {
+            CommandLine commandLine = CommandLine.getInstance();
+            if (!commandLine.hasSwitch(SWITCH_IN_PROCESS_GPU)) {
+                commandLine.appendSwitch(SWITCH_IN_PROCESS_GPU);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to apply IP-TEST command line switches", t);
+        }
     }
 
     private static void startOrRefreshLocked(
@@ -588,16 +602,12 @@ public final class IptestBridgeClient {
                             stillLoading = tab.isLoading();
                         } catch (Throwable ignored) {
                         }
-                        if (stillLoading
-                                && ("load".equals(waitUntil)
-                                        || "loadstopped".equals(waitUntil))) {
-                            return null;
-                        }
                         return new JSONObject()
                                 .put("ok", true)
                                 .put("url", expectedUrl)
                                 .put("finalUrl", finalUrl)
                                 .put("event", "url_committed_fallback")
+                                .put("stillLoading", stillLoading)
                                 .put("waitUntil", waitUntil)
                                 .put("durationMs", System.currentTimeMillis() - startedAt)
                                 .put("nativeState", collectNativeStateOnUi());
