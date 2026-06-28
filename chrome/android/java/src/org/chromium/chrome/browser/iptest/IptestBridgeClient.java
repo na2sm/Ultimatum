@@ -497,6 +497,30 @@ public final class IptestBridgeClient {
                         latch.countDown();
                     }
 
+                    private void finishIfUrlMatches(Tab tab, String event, GURL eventUrl) {
+                        String eventUrlString = eventUrl == null ? "" : String.valueOf(eventUrl);
+                        String tabUrl = safeTabUrl(tab);
+                        if (!urlMatches(eventUrlString, url)
+                                && !urlMatches(tabUrl, url)
+                                && !urlMatches(mLastKnownUrl, url)) {
+                            return;
+                        }
+                        finish(tab, event, eventUrl);
+                    }
+
+                    @Override
+                    public void onPageLoadStarted(Tab tab, GURL eventUrl) {
+                        // This callback reports the committed target URL. For IP-TEST automation
+                        // that is the reliable native navigation gate; page readiness is tested by
+                        // later page commands with their own watchdogs.
+                        finishIfUrlMatches(tab, "page_load_started_committed", eventUrl);
+                    }
+
+                    @Override
+                    public void onUrlUpdated(Tab tab) {
+                        finishIfUrlMatches(tab, "url_updated_committed", null);
+                    }
+
                     @Override
                     public void onDidFinishNavigationInPrimaryMainFrame(
                             Tab tab, NavigationHandle navigation) {
@@ -774,19 +798,12 @@ public final class IptestBridgeClient {
     }
 
     private Object getBrowserInfo() throws Exception {
-        JSONObject page = new JSONObject();
-        try {
-            Object snapshot = getPageSnapshot();
-            if (snapshot instanceof JSONObject) page = (JSONObject) snapshot;
-        } catch (Exception e) {
-            page.put("error", e.toString());
-        }
         return new JSONObject()
                 .put("packageName", mPackageName)
                 .put("bridgeVersion", BRIDGE_VERSION)
                 .put("userAgent", System.getProperty("http.agent", ""))
                 .put("nativeState", getNativeState())
-                .put("page", page);
+                .put("page", new JSONObject().put("nativeState", getNativeState()));
     }
 
     private JSONObject getNativeState() throws Exception {
