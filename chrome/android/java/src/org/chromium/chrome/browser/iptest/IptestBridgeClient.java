@@ -68,8 +68,6 @@ public final class IptestBridgeClient {
     private static final String TAG = "IptestBridgeClient";
     private static final String BRIDGE_VERSION = "native-v1";
     private static final String SWITCH_IN_PROCESS_GPU = "in-process-gpu";
-    private static final String SWITCH_SINGLE_PROCESS = "single-process";
-    private static final String SWITCH_RENDERER_PROCESS_LIMIT = "renderer-process-limit";
     private static final Object LOCK = new Object();
     private static final long START_RETRY_DELAY_MS = 300;
     private static final long START_RETRY_DEADLINE_MS = 60000;
@@ -216,12 +214,6 @@ public final class IptestBridgeClient {
             if (!commandLine.hasSwitch(SWITCH_IN_PROCESS_GPU)) {
                 commandLine.appendSwitch(SWITCH_IN_PROCESS_GPU);
             }
-            if (!commandLine.hasSwitch(SWITCH_SINGLE_PROCESS)) {
-                commandLine.appendSwitch(SWITCH_SINGLE_PROCESS);
-            }
-            if (!commandLine.hasSwitch(SWITCH_RENDERER_PROCESS_LIMIT)) {
-                commandLine.appendSwitchWithValue(SWITCH_RENDERER_PROCESS_LIMIT, "1");
-            }
         } catch (Throwable t) {
             Log.w(TAG, "Failed to apply IP-TEST command line switches", t);
         }
@@ -291,9 +283,44 @@ public final class IptestBridgeClient {
     }
 
     private void start() {
+        logStartupDiagnostics("bridge_start");
         Thread thread = new Thread(this::runLoop, "IPTEST-BrowserBridge");
         thread.setDaemon(true);
         thread.start();
+    }
+
+    private void logStartupDiagnostics(String event) {
+        try {
+            CommandLine commandLine = CommandLine.getInstance();
+            JSONObject switches =
+                    new JSONObject()
+                            .put("inProcessGpu", commandLine.hasSwitch(SWITCH_IN_PROCESS_GPU))
+                            .put("singleProcess", commandLine.hasSwitch("single-process"))
+                            .put(
+                                    "rendererProcessLimit",
+                                    commandLine.hasSwitch("renderer-process-limit"));
+            JSONObject diagnostics =
+                    new JSONObject()
+                            .put("event", event)
+                            .put("bridgeVersion", BRIDGE_VERSION)
+                            .put("serial", mSerial)
+                            .put("packageName", mPackageName)
+                            .put("hubHost", safeHubHost(mHubUrl))
+                            .put("tokenPresent", !isBlank(mToken))
+                            .put("commandLineSwitches", switches);
+            Log.i(TAG, "IP-TEST bridge startup diagnostics: %s", diagnostics.toString());
+            addBridgeLog("debug", event, diagnostics.toString());
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to log IP-TEST bridge startup diagnostics", t);
+        }
+    }
+
+    private static String safeHubHost(String hubUrl) {
+        try {
+            return new URL(hubUrl).getHost();
+        } catch (Throwable ignored) {
+            return "";
+        }
     }
 
     private void stop() {
