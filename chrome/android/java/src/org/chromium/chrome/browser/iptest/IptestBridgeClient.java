@@ -973,10 +973,23 @@ public final class IptestBridgeClient {
             return result;
         } catch (Exception isolatedError) {
             addBridgeLog("warn", "evaluate:isolated_world_failed", isolatedError.toString());
-            resetAutomationTabBestEffort("evaluate_failed");
-            throw new IllegalStateException(
-                    "evaluate failed; mainFrame=" + isolatedError,
-                    isolatedError);
+            try {
+                Object result =
+                        evaluateWithWebContents(
+                                expression, Math.min(Math.max(1000, timeoutMs / 2), 10000));
+                mPreferIsolatedWorldEval = false;
+                addBridgeLog("info", "evaluate:webcontents_fallback_success", "");
+                return result;
+            } catch (Exception webContentsError) {
+                addBridgeLog("warn", "evaluate:webcontents_failed", webContentsError.toString());
+                resetAutomationTabBestEffort("evaluate_failed");
+                throw new IllegalStateException(
+                        "evaluate failed; mainFrame="
+                                + isolatedError
+                                + "; webContents="
+                                + webContentsError,
+                        webContentsError);
+            }
         }
     }
 
