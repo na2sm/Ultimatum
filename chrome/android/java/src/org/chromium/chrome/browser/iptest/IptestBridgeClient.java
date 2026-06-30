@@ -987,7 +987,6 @@ public final class IptestBridgeClient {
             return result;
         } catch (Exception isolatedError) {
             addBridgeLog("warn", "evaluate:isolated_world_failed", isolatedError.toString());
-            resetAutomationTabBestEffort("evaluate_failed");
             throw new IllegalStateException(
                     "evaluate failed; isolatedWorld=" + isolatedError
                             + "; webContentsFallback=disabled",
@@ -1004,7 +1003,6 @@ public final class IptestBridgeClient {
             return result;
         } catch (Exception isolatedError) {
             addBridgeLog("warn", "evaluate_internal:isolated_world_failed", isolatedError.toString());
-            resetAutomationTabBestEffort("evaluate_internal_failed");
             throw new IllegalStateException(
                     "evaluate internal failed; isolatedWorld=" + isolatedError
                             + "; webContentsFallback=disabled",
