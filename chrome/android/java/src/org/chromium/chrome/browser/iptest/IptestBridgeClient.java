@@ -741,12 +741,14 @@ public final class IptestBridgeClient {
 
     private Object cleanup() throws Exception {
         long startedAt = System.currentTimeMillis();
+        JSONObject preResetResult = resetAutomationTabBestEffort("cleanup:pre");
+        sleep(1000);
         JSONObject profileResult = clearNativeProfileData();
         JSONObject pageResult = runPageLevelCleanupBestEffort();
         boolean nativeOk = profileResult.optBoolean("ok", false);
         boolean pageOk = pageResult.optBoolean("ok", false);
         boolean pageBlocking = pageResult.optBoolean("blocking", false);
-        JSONObject resetResult = resetAutomationTabBestEffort("cleanup");
+        JSONObject resetResult = resetAutomationTabBestEffort("cleanup:post");
         JSONObject result =
                 new JSONObject()
                         .put("ok", nativeOk)
@@ -754,6 +756,7 @@ public final class IptestBridgeClient {
                         .put("nativeProfileCleared", nativeOk)
                         .put("pageLevelCleared", pageOk)
                         .put("pageLevelBlocking", pageBlocking)
+                        .put("preReset", preResetResult)
                         .put("profile", profileResult)
                         .put("page", pageResult)
                         .put("reset", resetResult)
@@ -978,29 +981,17 @@ public final class IptestBridgeClient {
     private Object evaluatePage(String expression, long timeoutMs) throws Exception {
         if (isBlank(expression)) throw new IllegalArgumentException("evaluate expression is required");
         waitForWebContents("about:blank", Math.min(Math.max(5000, timeoutMs), 15000));
-        long isolatedTimeoutMs = Math.min(Math.max(1000, timeoutMs / 3), 6000);
-        long fallbackTimeoutMs = Math.min(Math.max(1000, timeoutMs - isolatedTimeoutMs - 1000), 10000);
         try {
-            Object result = evaluateWithMainFrame(expression, isolatedTimeoutMs);
+            Object result = evaluateWithMainFrame(expression, timeoutMs);
             mPreferIsolatedWorldEval = true;
             return result;
         } catch (Exception isolatedError) {
             addBridgeLog("warn", "evaluate:isolated_world_failed", isolatedError.toString());
-            try {
-                Object result = evaluateWithWebContents(expression, fallbackTimeoutMs);
-                mPreferIsolatedWorldEval = false;
-                addBridgeLog("info", "evaluate:webcontents_fallback_success", "");
-                return result;
-            } catch (Exception webContentsError) {
-                addBridgeLog("warn", "evaluate:webcontents_failed", webContentsError.toString());
-                resetAutomationTabBestEffort("evaluate_failed");
-                throw new IllegalStateException(
-                        "evaluate failed; mainFrame="
-                                + isolatedError
-                                + "; webContents="
-                                + webContentsError,
-                        webContentsError);
-            }
+            resetAutomationTabBestEffort("evaluate_failed");
+            throw new IllegalStateException(
+                    "evaluate failed; isolatedWorld=" + isolatedError
+                            + "; webContentsFallback=disabled",
+                    isolatedError);
         }
     }
 
@@ -1012,13 +1003,12 @@ public final class IptestBridgeClient {
             mPreferIsolatedWorldEval = true;
             return result;
         } catch (Exception isolatedError) {
-            addBridgeLog("warn", "evaluate_internal:fallback_webcontents", isolatedError.toString());
-            try {
-                return evaluateWithWebContents(expression, Math.min(Math.max(1000, timeoutMs / 2), 5000));
-            } catch (Exception webContentsError) {
-                resetAutomationTabBestEffort("evaluate_internal_failed");
-                throw webContentsError;
-            }
+            addBridgeLog("warn", "evaluate_internal:isolated_world_failed", isolatedError.toString());
+            resetAutomationTabBestEffort("evaluate_internal_failed");
+            throw new IllegalStateException(
+                    "evaluate internal failed; isolatedWorld=" + isolatedError
+                            + "; webContentsFallback=disabled",
+                    isolatedError);
         }
     }
 
