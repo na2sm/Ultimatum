@@ -967,16 +967,16 @@ public final class IptestBridgeClient {
     private Object evaluatePage(String expression, long timeoutMs) throws Exception {
         if (isBlank(expression)) throw new IllegalArgumentException("evaluate expression is required");
         waitForWebContents("about:blank", Math.min(Math.max(5000, timeoutMs), 15000));
+        long isolatedTimeoutMs = Math.min(Math.max(1000, timeoutMs / 3), 6000);
+        long fallbackTimeoutMs = Math.min(Math.max(1000, timeoutMs - isolatedTimeoutMs - 1000), 10000);
         try {
-            Object result = evaluateWithMainFrame(expression, timeoutMs);
+            Object result = evaluateWithMainFrame(expression, isolatedTimeoutMs);
             mPreferIsolatedWorldEval = true;
             return result;
         } catch (Exception isolatedError) {
             addBridgeLog("warn", "evaluate:isolated_world_failed", isolatedError.toString());
             try {
-                Object result =
-                        evaluateWithWebContents(
-                                expression, Math.min(Math.max(1000, timeoutMs / 2), 10000));
+                Object result = evaluateWithWebContents(expression, fallbackTimeoutMs);
                 mPreferIsolatedWorldEval = false;
                 addBridgeLog("info", "evaluate:webcontents_fallback_success", "");
                 return result;
