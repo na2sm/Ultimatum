@@ -9,6 +9,7 @@ import android.content.Intent;
 
 import org.chromium.base.CommandLine;
 import org.chromium.base.Log;
+import org.chromium.base.TerminationStatus;
 import org.chromium.base.ThreadUtils;
 import org.chromium.chrome.browser.browsing_data.BrowsingDataBridge;
 import org.chromium.chrome.browser.browsing_data.BrowsingDataType;
@@ -26,6 +27,7 @@ import org.chromium.content_public.browser.LoadUrlParams;
 import org.chromium.content_public.browser.NavigationHandle;
 import org.chromium.content_public.browser.RenderFrameHost;
 import org.chromium.content_public.browser.WebContents;
+import org.chromium.content_public.browser.WebContentsObserver;
 import org.chromium.url.GURL;
 
 import org.json.JSONArray;
@@ -88,6 +90,8 @@ public final class IptestBridgeClient {
     private volatile boolean mPreferIsolatedWorldEval;
     private volatile int mAutomationTabId = -1;
     private volatile boolean mRendererResponsive = true;
+    private volatile boolean mRenderProcessGone;
+    private volatile int mLastRenderProcessTerminationStatus = -1;
     private volatile long mLastLoadStoppedAt;
     private volatile long mLastPageLoadFinishedAt;
     private volatile long mLastNavigationFinishedAt;
@@ -96,10 +100,12 @@ public final class IptestBridgeClient {
     private volatile String mLastNavigationError = "";
     private volatile String mLastCrash = "";
     private Tab mObservedTab;
+    private WebContents mObservedWebContents;
     private final EmptyTabObserver mAutomationTabObserver =
             new EmptyTabObserver() {
                 @Override
                 public void onContentChanged(Tab tab) {
+                    attachAutomationWebContentsObserver(tab);
                     recordTabSnapshot(tab, "content_changed");
                 }
 
@@ -154,6 +160,30 @@ public final class IptestBridgeClient {
                 public void onRendererResponsiveStateChanged(Tab tab, boolean isResponsive) {
                     mRendererResponsive = isResponsive;
                     recordTabSnapshot(tab, isResponsive ? "renderer_responsive" : "renderer_unresponsive");
+                }
+            };
+    private final WebContentsObserver mAutomationWebContentsObserver =
+            new WebContentsObserver() {
+                @Override
+                public void primaryMainFrameRenderProcessGone(
+                        @TerminationStatus int terminationStatus) {
+                    mRenderProcessGone = true;
+                    mLastRenderProcessTerminationStatus = terminationStatus;
+                    mRendererResponsive = false;
+                    mLastCrash =
+                            "primary_main_frame_render_process_gone:"
+                                    + terminationStatus
+                                    + ":"
+                                    + System.currentTimeMillis();
+                    addBridgeLog("warn", "renderer:primary_main_frame_gone", mLastCrash);
+                }
+
+                @Override
+                public void webContentsDestroyed() {
+                    mRenderProcessGone = true;
+                    mRendererResponsive = false;
+                    mLastCrash = "web_contents_destroyed:" + System.currentTimeMillis();
+                    addBridgeLog("warn", "renderer:web_contents_destroyed", mLastCrash);
                 }
             };
 
@@ -913,15 +943,25 @@ public final class IptestBridgeClient {
             boolean nativeReady = lastState.optBoolean("nativeReady", false);
             boolean tabModelsReady = lastState.optBoolean("tabModelsReady", false);
             boolean readyForCommands = lastState.optBoolean("readyForCommands", false);
+            boolean rendererHealthy = lastState.optBoolean("rendererHealthy", true);
             if (readyForCommands) {
                 lastState.put("ok", true);
                 return lastState;
+            }
+            if (!triedReset && nativeReady && tabModelsReady && !rendererHealthy) {
+                triedReset = true;
+                resetAutomationTabBestEffort("renderer_unhealthy");
+                sleep(500);
+                continue;
             }
             if (!triedReset && nativeReady && tabModelsReady) {
                 triedReset = true;
                 resetAutomationTabBestEffort("wait_for_native_ready");
             }
             sleep(250);
+        }
+        if (!lastState.optBoolean("rendererHealthy", true)) {
+            throw new IllegalStateException("native_renderer_unhealthy " + lastState);
         }
         throw new IllegalStateException("native_ready_timeout " + lastState);
     }
@@ -1052,6 +1092,11 @@ public final class IptestBridgeClient {
                                 webContents == null ? null : webContents.getMainFrame();
                         if (mainFrame == null || !mainFrame.isRenderFrameLive()) {
                             error.set("No live main frame " + describeActivityState(activity));
+                            latch.countDown();
+                            return;
+                        }
+                        if (!isRendererHealthyForCommands()) {
+                            error.set("Renderer unhealthy " + describeActivityState(activity));
                             latch.countDown();
                             return;
                         }
@@ -1200,6 +1245,7 @@ public final class IptestBridgeClient {
         try {
             if (mObservedTab == tab) {
                 mAutomationTabId = tab.getId();
+                attachAutomationWebContentsObserver(tab);
                 recordTabSnapshot(tab, "tab_observed");
                 return;
             }
@@ -1212,9 +1258,28 @@ public final class IptestBridgeClient {
             mObservedTab = tab;
             mAutomationTabId = tab.getId();
             tab.addObserver(mAutomationTabObserver);
+            attachAutomationWebContentsObserver(tab);
             recordTabSnapshot(tab, "tab_observed");
         } catch (Throwable t) {
             addBridgeLog("warn", "tab:observe_failed", t.toString());
+        }
+    }
+
+    private void attachAutomationWebContentsObserver(Tab tab) {
+        try {
+            WebContents webContents = tab == null ? null : tab.getWebContents();
+            if (mObservedWebContents == webContents) return;
+            mAutomationWebContentsObserver.observe(null);
+            mObservedWebContents = webContents;
+            if (webContents != null) {
+                mRenderProcessGone = false;
+                mLastRenderProcessTerminationStatus = -1;
+                mRendererResponsive = true;
+                mLastCrash = "";
+                mAutomationWebContentsObserver.observe(webContents);
+            }
+        } catch (Throwable t) {
+            addBridgeLog("warn", "renderer:observe_failed", t.toString());
         }
     }
 
@@ -1261,6 +1326,7 @@ public final class IptestBridgeClient {
         boolean hasWebContents = false;
         boolean hasMainFrame = false;
         boolean mainFrameLive = false;
+        boolean rendererHealthy = isRendererHealthyForCommands();
         String url = "";
         int tabId = -1;
         if (tab != null) {
@@ -1297,7 +1363,8 @@ public final class IptestBridgeClient {
                         && activityTabId == tabId
                         && hasWebContents
                         && hasMainFrame
-                        && mainFrameLive;
+                        && mainFrameLive
+                        && rendererHealthy;
         return new JSONObject()
                 .put("nativeReady", nativeReady)
                 .put("tabModelsReady", tabModelsReady)
@@ -1313,7 +1380,10 @@ public final class IptestBridgeClient {
                 .put("hasWebContents", hasWebContents)
                 .put("hasMainFrame", hasMainFrame)
                 .put("mainFrameLive", mainFrameLive)
+                .put("rendererHealthy", rendererHealthy)
                 .put("rendererResponsive", mRendererResponsive)
+                .put("renderProcessGone", mRenderProcessGone)
+                .put("lastRenderProcessTerminationStatus", mLastRenderProcessTerminationStatus)
                 .put("lastLoadStopped", mLastLoadStoppedAt)
                 .put("lastPageLoadFinished", mLastPageLoadFinishedAt)
                 .put("lastNavigationFinished", mLastNavigationFinishedAt)
@@ -1367,13 +1437,20 @@ public final class IptestBridgeClient {
         }
     }
 
+    private boolean isRendererHealthyForCommands() {
+        return mRendererResponsive && !mRenderProcessGone && isBlank(mLastCrash);
+    }
+
     private boolean isTabReadyForJs(Tab tab) {
         if (tab == null || !tab.isInitialized() || tab.isDestroyed() || tab.isClosing()) {
             return false;
         }
         WebContents webContents = tab.getWebContents();
         RenderFrameHost mainFrame = webContents == null ? null : webContents.getMainFrame();
-        return webContents != null && mainFrame != null && mainFrame.isRenderFrameLive();
+        return webContents != null
+                && mainFrame != null
+                && mainFrame.isRenderFrameLive()
+                && isRendererHealthyForCommands();
     }
 
     private boolean isUsableTab(Tab tab) {
@@ -1416,6 +1493,7 @@ public final class IptestBridgeClient {
         boolean hasWebContents = false;
         boolean hasMainFrame = false;
         boolean mainFrameLive = false;
+        boolean rendererHealthy = isRendererHealthyForCommands();
         try {
             initialized = tab.isInitialized();
         } catch (Throwable ignored) {
@@ -1452,6 +1530,16 @@ public final class IptestBridgeClient {
                 + hasMainFrame
                 + ", mainFrameLive="
                 + mainFrameLive
+                + ", rendererHealthy="
+                + rendererHealthy
+                + ", renderProcessGone="
+                + mRenderProcessGone
+                + ", lastRenderProcessTerminationStatus="
+                + mLastRenderProcessTerminationStatus
+                + ", rendererResponsive="
+                + mRendererResponsive
+                + ", lastCrash="
+                + mLastCrash
                 + ", url="
                 + url;
     }
