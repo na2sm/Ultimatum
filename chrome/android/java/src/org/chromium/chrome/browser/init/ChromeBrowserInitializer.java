@@ -18,6 +18,7 @@ import org.chromium.base.task.TaskTraits;
 import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.browser.flags.ChromeSwitches;
+import org.chromium.chrome.browser.iptest.IptestBridgeClient;
 import org.chromium.chrome.browser.profiles.ProfileManager;
 import org.chromium.chrome.browser.signin.SigninCheckerProvider;
 import org.chromium.components.background_task_scheduler.BackgroundTaskSchedulerFactory;
@@ -258,12 +259,13 @@ public class ChromeBrowserInitializer {
             BrowserStartupController.StartupCallback callback) {
         try {
             TraceEvent.begin("ChromeBrowserInitializer.startChromeBrowserProcessesAsync");
+            boolean singleProcess = IptestBridgeClient.shouldUseSingleProcessStartup();
             getBrowserStartupController()
                     .startBrowserProcessesAsync(
                             LibraryProcessType.PROCESS_BROWSER,
                             startGpuProcess,
                             startMinimalBrowser,
-                            /* singleProcess= */ false,
+                            singleProcess,
                             /* scheduleFlushStartupTasks= */ false,
                             callback);
         } finally {
@@ -278,10 +280,11 @@ public class ChromeBrowserInitializer {
             StrictMode.ThreadPolicy oldPolicy = StrictMode.allowThreadDiskReads();
             LibraryLoader.getInstance().ensureInitialized();
             StrictMode.setThreadPolicy(oldPolicy);
+            boolean singleProcess = IptestBridgeClient.shouldUseSingleProcessStartup();
             getBrowserStartupController()
                     .startBrowserProcessesSync(
                             LibraryProcessType.PROCESS_BROWSER,
-                            /* singleProcess= */ false,
+                            singleProcess,
                             /* startGpuProcess= */ startGpuProcess);
             SigninCheckerProvider.get(ProfileManager.getLastUsedRegularProfile());
         } finally {

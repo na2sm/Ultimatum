@@ -78,6 +78,7 @@ public final class IptestBridgeClient {
     private static IptestBridgeClient sClient;
     private static PendingLaunch sPendingLaunch;
     private static boolean sPendingRetryScheduled;
+    private static volatile boolean sIptestLaunchRequested;
 
     private WeakReference<ChromeTabbedActivity> mActivity;
     private final Context mAppContext;
@@ -214,13 +215,25 @@ public final class IptestBridgeClient {
         mPackageName = mAppContext.getPackageName();
     }
 
+    /** Marks an incoming launcher intent before Chromium's process mode is selected. */
+    public static boolean markLaunchIntentForStartup(Intent intent) {
+        if (!hasBridgeLaunchExtras(intent)) return false;
+        sIptestLaunchRequested = true;
+        return true;
+    }
+
+    /** Returns whether the current browser process was launched for IP-TEST automation. */
+    public static boolean shouldUseSingleProcessStartup() {
+        return sIptestLaunchRequested;
+    }
+
     /** Starts or refreshes the singleton bridge when an IP-TEST launcher intent is present. */
     public static boolean maybeStartFromIntent(ChromeTabbedActivity activity, Intent intent) {
         if (activity == null || intent == null) return false;
+        if (!markLaunchIntentForStartup(intent)) return false;
         String serial = intent.getStringExtra(EXTRA_SERIAL);
         String hubUrl = intent.getStringExtra(EXTRA_HUB_URL);
         String token = intent.getStringExtra(EXTRA_TOKEN);
-        if (isBlank(serial) || isBlank(hubUrl) || isBlank(token)) return false;
         ensureIptestCommandLineSwitches();
 
         synchronized (LOCK) {
@@ -236,6 +249,14 @@ public final class IptestBridgeClient {
             startOrRefreshLocked(activity, trimmedSerial, trimmedHubUrl, trimmedToken);
         }
         return true;
+    }
+
+    private static boolean hasBridgeLaunchExtras(Intent intent) {
+        if (intent == null) return false;
+        String serial = intent.getStringExtra(EXTRA_SERIAL);
+        String hubUrl = intent.getStringExtra(EXTRA_HUB_URL);
+        String token = intent.getStringExtra(EXTRA_TOKEN);
+        return !isBlank(serial) && !isBlank(hubUrl) && !isBlank(token);
     }
 
     private static void ensureIptestCommandLineSwitches() {

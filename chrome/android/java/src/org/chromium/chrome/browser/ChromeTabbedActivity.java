@@ -737,6 +737,7 @@ public class ChromeTabbedActivity extends ChromeActivity implements PreAttachInt
 
     @Override
     protected void attachBaseContext(Context newBase) {
+        IptestBridgeClient.markLaunchIntentForStartup(getIntent());
         if (IncognitoUtils.shouldOpenIncognitoAsWindow() && getIntent() != null) {
             // Check for incognito extras here if intent is available to allow for override
             // day/night theme.
