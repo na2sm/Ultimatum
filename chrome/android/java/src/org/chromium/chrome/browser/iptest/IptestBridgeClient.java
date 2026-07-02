@@ -734,7 +734,9 @@ public final class IptestBridgeClient {
         if (isBlank(reason) || isBlank(expectedUrl)) return false;
         boolean aborted =
                 reason.startsWith("navigation_error:-3:")
-                        || reason.startsWith("page_load_failed:-3");
+                        || reason.startsWith("page_load_failed:-3")
+                        || reason.startsWith("navigation_error:-15:")
+                        || reason.startsWith("page_load_failed:-15");
         if (!aborted) return false;
         String tabUrl = safeTabUrl(tab);
         boolean committed =
