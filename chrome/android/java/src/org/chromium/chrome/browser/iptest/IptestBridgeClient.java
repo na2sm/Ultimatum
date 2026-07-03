@@ -4,6 +4,7 @@
 
 package org.chromium.chrome.browser.iptest;
 
+import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
 
@@ -473,6 +474,7 @@ public final class IptestBridgeClient {
             case "getNativeState":
             case "waitForNativeReady":
             case "resetAutomationTab":
+            case "bringTaskToFront":
             case "getBrowserInfo":
                 return 10000;
             default:
@@ -500,6 +502,8 @@ public final class IptestBridgeClient {
                 return waitForNativeReady(payload.optLong("timeoutMs", 15000));
             case "resetAutomationTab":
                 return resetAutomationTab(payload.optString("reason", "command"));
+            case "bringTaskToFront":
+                return bringTaskToFront(payload.optString("reason", "command"));
             case "getPageSnapshot":
                 return getPageSnapshot();
             case "clickSelector":
@@ -1031,6 +1035,55 @@ public final class IptestBridgeClient {
                 return new JSONObject();
             }
         }
+    }
+
+    private JSONObject bringTaskToFront(String reason) throws Exception {
+        JSONObject result =
+                ThreadUtils.runOnUiThreadBlocking(
+                        () -> {
+                            ChromeTabbedActivity activity = mActivity.get();
+                            JSONObject output = new JSONObject();
+                            try {
+                                if (activity == null) {
+                                    return output.put("ok", false).put("reason", "no_activity");
+                                }
+                                ActivityManager activityManager =
+                                        (ActivityManager)
+                                                mAppContext.getSystemService(Context.ACTIVITY_SERVICE);
+                                if (activityManager == null) {
+                                    return output.put("ok", false).put("reason", "no_activity_manager");
+                                }
+                                int activityTaskId = activity.getTaskId();
+                                int examinedTasks = 0;
+                                for (ActivityManager.AppTask task : activityManager.getAppTasks()) {
+                                    examinedTasks++;
+                                    ActivityManager.RecentTaskInfo taskInfo = task.getTaskInfo();
+                                    int taskId = taskInfo == null ? -1 : taskInfo.id;
+                                    if (taskId != activityTaskId) continue;
+                                    task.moveToFront();
+                                    addBridgeLog(
+                                            "info",
+                                            "task:move_to_front",
+                                            "reason=" + reason + " taskId=" + taskId);
+                                    return output
+                                            .put("ok", true)
+                                            .put("reason", reason)
+                                            .put("taskId", taskId)
+                                            .put("examinedTasks", examinedTasks)
+                                            .put("nativeState", collectNativeStateOnUi());
+                                }
+                                return output
+                                        .put("ok", false)
+                                        .put("reason", "task_not_found")
+                                        .put("activityTaskId", activityTaskId)
+                                        .put("examinedTasks", examinedTasks)
+                                        .put("nativeState", collectNativeStateOnUi());
+                            } catch (Exception e) {
+                                return output.put("ok", false).put("reason", e.toString());
+                            }
+                        });
+        sleep(250);
+        return result;
     }
 
     private Object evaluatePage(String expression, long timeoutMs) throws Exception {
