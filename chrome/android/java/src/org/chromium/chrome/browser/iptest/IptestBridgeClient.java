@@ -475,6 +475,7 @@ public final class IptestBridgeClient {
             case "waitForNativeReady":
             case "resetAutomationTab":
             case "bringTaskToFront":
+            case "goBack":
             case "getBrowserInfo":
                 return 10000;
             default:
@@ -522,6 +523,18 @@ public final class IptestBridgeClient {
                         tab -> {
                             tab.reload();
                             return new JSONObject().put("ok", true);
+                        });
+            case "goBack":
+                return runWithTab(
+                        "about:blank",
+                        tab -> {
+                            boolean canGoBack = tab.canGoBack();
+                            if (canGoBack) tab.goBack();
+                            return new JSONObject()
+                                    .put("ok", true)
+                                    .put("navigated", canGoBack)
+                                    .put("url", safeTabUrl(tab))
+                                    .put("nativeState", collectNativeStateOnUi());
                         });
             case "goForward":
                 return runWithTab(
