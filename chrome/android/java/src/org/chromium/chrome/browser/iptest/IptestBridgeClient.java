@@ -24,12 +24,15 @@ import org.chromium.chrome.browser.tabmodel.TabClosureParams;
 import org.chromium.chrome.browser.tabmodel.TabModel;
 import org.chromium.chrome.browser.tabmodel.TabModelUtils;
 import org.chromium.chrome.browser.browsing_data.TimePeriod;
+import org.chromium.components.browsing_data.content.BrowsingDataInfo;
+import org.chromium.components.browsing_data.content.BrowsingDataModel;
 import org.chromium.content_public.browser.LoadUrlParams;
 import org.chromium.content_public.browser.NavigationHandle;
 import org.chromium.content_public.browser.RenderFrameHost;
 import org.chromium.content_public.browser.WebContents;
 import org.chromium.content_public.browser.WebContentsObserver;
 import org.chromium.url.GURL;
+import org.chromium.url.Origin;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -45,8 +48,11 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -464,7 +470,7 @@ public final class IptestBridgeClient {
         if (requested > 0) return clamp(requested + 5000, 5000, 60000);
         switch (name) {
             case "cleanup":
-                return 40000;
+                return 60000;
             case "navigate":
                 return 45000;
             case "evaluate":
@@ -514,7 +520,7 @@ public final class IptestBridgeClient {
                         payload.optString("selector", ""),
                         payload.optString("value", ""));
             case "cleanup":
-                return cleanup();
+                return cleanup(payload);
             case "getLogs":
                 return getLogs();
             case "reload":
@@ -801,23 +807,43 @@ public final class IptestBridgeClient {
         }
     }
 
-    private Object cleanup() throws Exception {
+    private Object cleanup(JSONObject payload) throws Exception {
         long startedAt = System.currentTimeMillis();
+        List<String> verificationDomains = parseVerificationDomains(payload);
+        boolean verifyStorage = payload.optBoolean("verifyStorage", !verificationDomains.isEmpty());
         JSONObject preResetResult = resetAutomationTabBestEffort("cleanup:pre");
         sleep(1000);
         JSONObject profileResult = clearNativeProfileData();
         JSONObject pageResult = runPageLevelCleanupBestEffort();
+        JSONObject verificationResult = verifyStorage
+                ? verifyNativeProfileDataCleared(verificationDomains)
+                : new JSONObject()
+                        .put("ok", true)
+                        .put("supported", true)
+                        .put("skipped", true)
+                        .put("reason", "verifyStorage=false")
+                        .put("checkedDomains", new JSONArray())
+                        .put("remainingDomains", new JSONArray())
+                        .put("remainingCount", 0);
         boolean nativeOk = profileResult.optBoolean("ok", false);
         boolean pageOk = pageResult.optBoolean("ok", false);
         boolean pageBlocking = pageResult.optBoolean("blocking", false);
+        boolean verificationOk = verificationResult.optBoolean("ok", false);
         JSONObject resetResult = resetAutomationTabBestEffort("cleanup:post");
         JSONObject result =
                 new JSONObject()
-                        .put("ok", nativeOk)
+                        .put("ok", nativeOk && verificationOk)
                         .put("mode", "native_profile_plus_page")
                         .put("nativeProfileCleared", nativeOk)
                         .put("pageLevelCleared", pageOk)
                         .put("pageLevelBlocking", pageBlocking)
+                        .put("cleanupDataTypes", new JSONArray()
+                                .put("history")
+                                .put("site_data")
+                                .put("cache")
+                                .put("form_data")
+                                .put("site_settings"))
+                        .put("cleanupVerification", verificationResult)
                         .put("preReset", preResetResult)
                         .put("profile", profileResult)
                         .put("page", pageResult)
@@ -825,6 +851,175 @@ public final class IptestBridgeClient {
                         .put("durationMs", System.currentTimeMillis() - startedAt);
         addBridgeLog(result.optBoolean("ok", false) ? "debug" : "warn", "cleanup", result.toString());
         return result;
+    }
+
+    private List<String> parseVerificationDomains(JSONObject payload) {
+        Set<String> domains = new LinkedHashSet<>();
+        JSONArray rawDomains = payload.optJSONArray("verificationDomains");
+        if (rawDomains != null) {
+            for (int i = 0; i < rawDomains.length(); i++) {
+                String domain = normalizeDomain(rawDomains.optString(i, ""));
+                if (!isBlank(domain)) domains.add(domain);
+            }
+        }
+        String singleDomain = normalizeDomain(payload.optString("verificationDomain", ""));
+        if (!isBlank(singleDomain)) domains.add(singleDomain);
+        return new ArrayList<>(domains);
+    }
+
+    private static String normalizeDomain(String value) {
+        if (value == null) return "";
+        String candidate = value.trim().toLowerCase(Locale.ROOT);
+        if (candidate.isEmpty()) return "";
+        try {
+            if (candidate.startsWith("http://") || candidate.startsWith("https://")) {
+                GURL gurl = new GURL(candidate);
+                candidate = gurl.getHost();
+            } else {
+                int schemeIndex = candidate.indexOf("://");
+                if (schemeIndex >= 0) candidate = candidate.substring(schemeIndex + 3);
+                int slashIndex = candidate.indexOf('/');
+                if (slashIndex >= 0) candidate = candidate.substring(0, slashIndex);
+                int questionIndex = candidate.indexOf('?');
+                if (questionIndex >= 0) candidate = candidate.substring(0, questionIndex);
+                int hashIndex = candidate.indexOf('#');
+                if (hashIndex >= 0) candidate = candidate.substring(0, hashIndex);
+                if (candidate.startsWith("[")) {
+                    int closeBracket = candidate.indexOf(']');
+                    if (closeBracket > 0) candidate = candidate.substring(1, closeBracket);
+                } else {
+                    int colonIndex = candidate.indexOf(':');
+                    if (colonIndex > 0) candidate = candidate.substring(0, colonIndex);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        while (candidate.startsWith(".")) candidate = candidate.substring(1);
+        while (candidate.endsWith(".")) candidate = candidate.substring(0, candidate.length() - 1);
+        if (candidate.equals("localhost") || candidate.matches("\\d+\\.\\d+\\.\\d+\\.\\d+")) return candidate;
+        if (!candidate.matches("[a-z0-9.-]+")) return "";
+        return candidate;
+    }
+
+    private static boolean hostMatchesDomain(String host, String domain) {
+        String normalizedHost = normalizeDomain(host);
+        String normalizedDomain = normalizeDomain(domain);
+        if (isBlank(normalizedHost) || isBlank(normalizedDomain)) return false;
+        return normalizedHost.equals(normalizedDomain)
+                || normalizedHost.endsWith("." + normalizedDomain);
+    }
+
+    private JSONObject verifyNativeProfileDataCleared(List<String> domains) throws Exception {
+        long startedAt = System.currentTimeMillis();
+        JSONArray checkedDomains = new JSONArray();
+        for (String domain : domains) checkedDomains.put(domain);
+        if (domains.isEmpty()) {
+            return new JSONObject()
+                    .put("ok", true)
+                    .put("supported", true)
+                    .put("checkedDomains", checkedDomains)
+                    .put("remainingDomains", new JSONArray())
+                    .put("remainingCount", 0)
+                    .put("durationMs", System.currentTimeMillis() - startedAt);
+        }
+
+        CountDownLatch latch = new CountDownLatch(1);
+        AtomicReference<JSONObject> result = new AtomicReference<>();
+        AtomicReference<String> error = new AtomicReference<>();
+        ThreadUtils.postOnUiThread(
+                () -> {
+                    try {
+                        ChromeTabbedActivity activity = mActivity.get();
+                        Tab tab = getOrCreateActivityTab(activity, "about:blank");
+                        if (tab == null) {
+                            error.set("No current tab/profile " + describeActivityState(activity));
+                            latch.countDown();
+                            return;
+                        }
+                        Profile profile = tab.getProfile().getOriginalProfile();
+                        BrowsingDataBridge.buildBrowsingDataModelFromDisk(
+                                profile,
+                                model -> {
+                                    try {
+                                        JSONArray remaining = new JSONArray();
+                                        Map<Origin, BrowsingDataInfo> data =
+                                                model.getBrowsingDataInfo(profile, false);
+                                        for (Map.Entry<Origin, BrowsingDataInfo> entry : data.entrySet()) {
+                                            Origin origin = entry.getKey();
+                                            BrowsingDataInfo info = entry.getValue();
+                                            String host = normalizeDomain(origin.getHost());
+                                            if (isBlank(host)) continue;
+                                            String matchedDomain = "";
+                                            for (String domain : domains) {
+                                                if (hostMatchesDomain(host, domain)) {
+                                                    matchedDomain = domain;
+                                                    break;
+                                                }
+                                            }
+                                            if (isBlank(matchedDomain)) continue;
+                                            remaining.put(
+                                                    new JSONObject()
+                                                            .put("origin", origin.toString())
+                                                            .put("host", host)
+                                                            .put("matchedDomain", matchedDomain)
+                                                            .put("cookieCount", info.getCookieCount())
+                                                            .put("storageSize", info.getStorageSize())
+                                                            .put("importantDomain", info.isDomainImportant()));
+                                        }
+                                        result.set(
+                                                new JSONObject()
+                                                        .put("ok", remaining.length() == 0)
+                                                        .put("supported", true)
+                                                        .put("checkedDomains", checkedDomains)
+                                                        .put("remainingDomains", remaining)
+                                                        .put("remainingCount", remaining.length())
+                                                        .put("durationMs", System.currentTimeMillis() - startedAt));
+                                    } catch (Throwable t) {
+                                        error.set(t.toString());
+                                    } finally {
+                                        try {
+                                            model.destroy();
+                                        } catch (Throwable ignored) {
+                                        }
+                                        latch.countDown();
+                                    }
+                                });
+                    } catch (Throwable t) {
+                        error.set(t.toString());
+                        latch.countDown();
+                    }
+                });
+        boolean completed = latch.await(25000, TimeUnit.MILLISECONDS);
+        if (!completed) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("supported", true)
+                    .put("checkedDomains", checkedDomains)
+                    .put("remainingDomains", new JSONArray())
+                    .put("remainingCount", -1)
+                    .put("reason", "cleanup_verification_timeout")
+                    .put("durationMs", System.currentTimeMillis() - startedAt);
+        }
+        if (!isBlank(error.get())) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("supported", true)
+                    .put("checkedDomains", checkedDomains)
+                    .put("remainingDomains", new JSONArray())
+                    .put("remainingCount", -1)
+                    .put("reason", error.get())
+                    .put("durationMs", System.currentTimeMillis() - startedAt);
+        }
+        return result.get() != null
+                ? result.get()
+                : new JSONObject()
+                        .put("ok", false)
+                        .put("supported", true)
+                        .put("checkedDomains", checkedDomains)
+                        .put("remainingDomains", new JSONArray())
+                        .put("remainingCount", -1)
+                        .put("reason", "cleanup_verification_missing_result")
+                        .put("durationMs", System.currentTimeMillis() - startedAt);
     }
 
     private JSONObject clearNativeProfileData() throws Exception {
