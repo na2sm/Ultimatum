@@ -84,7 +84,7 @@ public final class IptestBridgeClient {
     private static final long START_RETRY_DEADLINE_MS = 60000;
     private static final long NAVIGATION_COMMITTED_SETTLE_MS = 2500;
     private static final Pattern FINGERPRINT_CONSOLE_IDS =
-            Pattern.compile("([A-Za-z0-9_-]{12,128})\\s+([A-Za-z0-9_-]{12,128})");
+            Pattern.compile("([A-Za-z0-9_.:-]{12,160})\\s+([A-Za-z0-9_-]{12,128})");
 
     private static IptestBridgeClient sClient;
     private static PendingLaunch sPendingLaunch;
