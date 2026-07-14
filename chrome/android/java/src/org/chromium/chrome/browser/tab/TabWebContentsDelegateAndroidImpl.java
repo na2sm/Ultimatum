@@ -34,6 +34,7 @@ import org.chromium.build.annotations.NullMarked;
 import org.chromium.build.annotations.Nullable;
 import org.chromium.chrome.R;
 import org.chromium.chrome.browser.ZoomController;
+import org.chromium.chrome.browser.iptest.IptestBridgeClient;
 import org.chromium.chrome.browser.app.bluetooth.BluetoothNotificationService;
 import org.chromium.chrome.browser.app.serial.SerialNotificationService;
 import org.chromium.chrome.browser.app.usb.UsbNotificationService;
@@ -256,6 +257,7 @@ final class TabWebContentsDelegateAndroidImpl extends TabWebContentsDelegateAndr
 
     @Override
     public boolean addMessageToConsole(int level, String message, int lineNumber, String sourceId) {
+        IptestBridgeClient.onPageConsoleMessage(mTab, level, message, lineNumber, sourceId);
         // Only output console.log messages on debug variants of Android OS. crbug/869804
         return !AndroidInfo.isDebugAndroid();
     }

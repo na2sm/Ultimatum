@@ -61,6 +61,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Native IP-TEST bridge for the dedicated browser fork.
@@ -81,6 +83,8 @@ public final class IptestBridgeClient {
     private static final long START_RETRY_DELAY_MS = 300;
     private static final long START_RETRY_DEADLINE_MS = 60000;
     private static final long NAVIGATION_COMMITTED_SETTLE_MS = 2500;
+    private static final Pattern FINGERPRINT_CONSOLE_IDS =
+            Pattern.compile("^\\s*([A-Za-z0-9_-]{12,128})\\s+([A-Za-z0-9_-]{12,128})\\s*$");
 
     private static IptestBridgeClient sClient;
     private static PendingLaunch sPendingLaunch;
@@ -107,6 +111,7 @@ public final class IptestBridgeClient {
     private volatile String mLastNavigationEvent = "";
     private volatile String mLastNavigationError = "";
     private volatile String mLastCrash = "";
+    private volatile JSONObject mLastFingerprintVisitorEvidence;
     private Tab mObservedTab;
     private WebContents mObservedWebContents;
     private final EmptyTabObserver mAutomationTabObserver =
@@ -220,6 +225,42 @@ public final class IptestBridgeClient {
         mHubUrl = trimTrailingSlash(hubUrl);
         mToken = token;
         mPackageName = mAppContext.getPackageName();
+    }
+
+    /** Records the exact Fingerprint result already emitted by the controlled KH test page. */
+    public static void onPageConsoleMessage(
+            Tab tab, int level, String message, int lineNumber, String sourceId) {
+        IptestBridgeClient client;
+        synchronized (LOCK) {
+            client = sClient;
+        }
+        if (client == null || client.mStopped) return;
+        client.recordFingerprintVisitorEvidence(tab, level, message, lineNumber, sourceId);
+    }
+
+    private void recordFingerprintVisitorEvidence(
+            Tab tab, int level, String message, int lineNumber, String sourceId) {
+        try {
+            if (tab == null || safeTabId(tab) != mAutomationTabId) return;
+            String pageUrl = safeTabUrl(tab);
+            String source = sourceId == null ? "" : sourceId;
+            if (!pageUrl.contains("khdevelopment.pl") && !source.contains("khdevelopment.pl")) return;
+            Matcher matcher = FINGERPRINT_CONSOLE_IDS.matcher(message == null ? "" : message);
+            if (!matcher.matches()) return;
+            JSONObject evidence =
+                    new JSONObject()
+                            .put("eventId", matcher.group(1))
+                            .put("visitorId", matcher.group(2))
+                            .put("pageUrl", pageUrl)
+                            .put("sourceId", source)
+                            .put("lineNumber", lineNumber)
+                            .put("consoleLevel", level)
+                            .put("capturedAt", System.currentTimeMillis())
+                            .put("source", "kh_page_console");
+            mLastFingerprintVisitorEvidence = evidence;
+            addBridgeLog("info", "fingerprint:visitor_result", evidence.toString());
+        } catch (Throwable ignored) {
+        }
     }
 
     /** Marks an incoming launcher intent before Chromium's process mode is selected. */
@@ -523,6 +564,8 @@ public final class IptestBridgeClient {
                 return cleanup(payload);
             case "getLogs":
                 return getLogs();
+            case "getVisitorIsolationEvidence":
+                return getVisitorIsolationEvidence();
             case "reload":
                 return runWithTab(
                         "about:blank",
@@ -809,6 +852,7 @@ public final class IptestBridgeClient {
 
     private Object cleanup(JSONObject payload) throws Exception {
         long startedAt = System.currentTimeMillis();
+        mLastFingerprintVisitorEvidence = null;
         List<String> verificationDomains = parseVerificationDomains(payload);
         boolean verifyStorage = payload.optBoolean("verifyStorage", !verificationDomains.isEmpty());
         JSONObject preResetResult = resetAutomationTabBestEffort("cleanup:pre");
@@ -1151,6 +1195,11 @@ public final class IptestBridgeClient {
             }
         }
         return logs;
+    }
+
+    private Object getVisitorIsolationEvidence() {
+        JSONObject evidence = mLastFingerprintVisitorEvidence;
+        return evidence == null ? JSONObject.NULL : evidence;
     }
 
     private Object getBrowserInfo() throws Exception {
