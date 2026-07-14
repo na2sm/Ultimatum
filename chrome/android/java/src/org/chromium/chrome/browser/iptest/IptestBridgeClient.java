@@ -84,7 +84,7 @@ public final class IptestBridgeClient {
     private static final long START_RETRY_DEADLINE_MS = 60000;
     private static final long NAVIGATION_COMMITTED_SETTLE_MS = 2500;
     private static final Pattern FINGERPRINT_CONSOLE_IDS =
-            Pattern.compile("^\\s*([A-Za-z0-9_-]{12,128})\\s+([A-Za-z0-9_-]{12,128})\\s*$");
+            Pattern.compile("([A-Za-z0-9_-]{12,128})\\s+([A-Za-z0-9_-]{12,128})");
 
     private static IptestBridgeClient sClient;
     private static PendingLaunch sPendingLaunch;
@@ -241,12 +241,18 @@ public final class IptestBridgeClient {
     private void recordFingerprintVisitorEvidence(
             Tab tab, int level, String message, int lineNumber, String sourceId) {
         try {
-            if (tab == null || safeTabId(tab) != mAutomationTabId) return;
+            if (tab == null) return;
             String pageUrl = safeTabUrl(tab);
             String source = sourceId == null ? "" : sourceId;
             if (!pageUrl.contains("khdevelopment.pl") && !source.contains("khdevelopment.pl")) return;
             Matcher matcher = FINGERPRINT_CONSOLE_IDS.matcher(message == null ? "" : message);
-            if (!matcher.matches()) return;
+            if (!matcher.find()) {
+                addBridgeLog(
+                        "debug",
+                        "fingerprint:console_unmatched",
+                        "messageLength=" + (message == null ? 0 : message.length()));
+                return;
+            }
             JSONObject evidence =
                     new JSONObject()
                             .put("eventId", matcher.group(1))
