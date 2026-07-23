@@ -75,9 +75,10 @@ public final class IptestBridgeClient {
     public static final String EXTRA_SERIAL = "iptest_serial";
     public static final String EXTRA_HUB_URL = "iptest_hub_url";
     public static final String EXTRA_TOKEN = "iptest_token";
+    public static final String EXTRA_SESSION_GENERATION = "iptest_session_generation";
 
     private static final String TAG = "IptestBridgeClient";
-    private static final String BRIDGE_VERSION = "native-v1";
+    private static final String BRIDGE_VERSION = "native-v2";
     private static final String SWITCH_IN_PROCESS_GPU = "in-process-gpu";
     private static final Object LOCK = new Object();
     private static final long START_RETRY_DELAY_MS = 300;
@@ -96,6 +97,7 @@ public final class IptestBridgeClient {
     private final String mSerial;
     private final String mHubUrl;
     private final String mToken;
+    private final String mSessionGeneration;
     private final String mPackageName;
     private final List<JSONObject> mBridgeLogs = new ArrayList<>();
     private volatile boolean mStopped;
@@ -205,25 +207,37 @@ public final class IptestBridgeClient {
         final String serial;
         final String hubUrl;
         final String token;
+        final String sessionGeneration;
         final long createdAt;
         int attempts;
 
-        PendingLaunch(ChromeTabbedActivity activity, String serial, String hubUrl, String token) {
+        PendingLaunch(
+                ChromeTabbedActivity activity,
+                String serial,
+                String hubUrl,
+                String token,
+                String sessionGeneration) {
             this.activity = new WeakReference<>(activity);
             this.serial = serial;
             this.hubUrl = hubUrl;
             this.token = token;
+            this.sessionGeneration = sessionGeneration;
             this.createdAt = System.currentTimeMillis();
         }
     }
 
     private IptestBridgeClient(
-            ChromeTabbedActivity activity, String serial, String hubUrl, String token) {
+            ChromeTabbedActivity activity,
+            String serial,
+            String hubUrl,
+            String token,
+            String sessionGeneration) {
         mActivity = new WeakReference<>(activity);
         mAppContext = activity.getApplicationContext();
         mSerial = serial;
         mHubUrl = trimTrailingSlash(hubUrl);
         mToken = token;
+        mSessionGeneration = sessionGeneration;
         mPackageName = mAppContext.getPackageName();
     }
 
@@ -288,19 +302,32 @@ public final class IptestBridgeClient {
         String serial = intent.getStringExtra(EXTRA_SERIAL);
         String hubUrl = intent.getStringExtra(EXTRA_HUB_URL);
         String token = intent.getStringExtra(EXTRA_TOKEN);
+        String sessionGeneration = intent.getStringExtra(EXTRA_SESSION_GENERATION);
         ensureIptestCommandLineSwitches();
 
         synchronized (LOCK) {
             String trimmedSerial = serial.trim();
             String trimmedHubUrl = hubUrl.trim();
             String trimmedToken = token.trim();
+            String trimmedSessionGeneration =
+                    isBlank(sessionGeneration) ? "" : sessionGeneration.trim();
             if (!isActivityReadyForBridge(activity)) {
                 sPendingLaunch =
-                        new PendingLaunch(activity, trimmedSerial, trimmedHubUrl, trimmedToken);
+                        new PendingLaunch(
+                                activity,
+                                trimmedSerial,
+                                trimmedHubUrl,
+                                trimmedToken,
+                                trimmedSessionGeneration);
                 schedulePendingStartLocked();
                 return true;
             }
-            startOrRefreshLocked(activity, trimmedSerial, trimmedHubUrl, trimmedToken);
+            startOrRefreshLocked(
+                    activity,
+                    trimmedSerial,
+                    trimmedHubUrl,
+                    trimmedToken,
+                    trimmedSessionGeneration);
         }
         return true;
     }
@@ -325,15 +352,21 @@ public final class IptestBridgeClient {
     }
 
     private static void startOrRefreshLocked(
-            ChromeTabbedActivity activity, String serial, String hubUrl, String token) {
+            ChromeTabbedActivity activity,
+            String serial,
+            String hubUrl,
+            String token,
+            String sessionGeneration) {
         sPendingLaunch = null;
-        if (sClient != null && sClient.matches(serial, hubUrl, token)) {
+        if (sClient != null && sClient.matches(serial, hubUrl, token, sessionGeneration)) {
             sClient.updateActivity(activity);
             sClient.resetAutomationTabBestEffort("activity_refreshed");
             return;
         }
         if (sClient != null) sClient.stop();
-        sClient = new IptestBridgeClient(activity, serial, hubUrl, token);
+        sClient =
+                new IptestBridgeClient(
+                        activity, serial, hubUrl, token, sessionGeneration);
         sClient.start();
     }
 
@@ -356,7 +389,11 @@ public final class IptestBridgeClient {
                         }
                         if (isActivityReadyForBridge(activity)) {
                             startOrRefreshLocked(
-                                    activity, pending.serial, pending.hubUrl, pending.token);
+                                    activity,
+                                    pending.serial,
+                                    pending.hubUrl,
+                                    pending.token,
+                                    pending.sessionGeneration);
                             return;
                         }
                         pending.attempts++;
@@ -381,10 +418,12 @@ public final class IptestBridgeClient {
         mActivity = new WeakReference<>(activity);
     }
 
-    private boolean matches(String serial, String hubUrl, String token) {
+    private boolean matches(
+            String serial, String hubUrl, String token, String sessionGeneration) {
         return mSerial.equals(serial)
                 && mHubUrl.equals(trimTrailingSlash(hubUrl))
-                && mToken.equals(token);
+                && mToken.equals(token)
+                && mSessionGeneration.equals(sessionGeneration);
     }
 
     private void start() {
@@ -415,6 +454,7 @@ public final class IptestBridgeClient {
                             .put("packageName", mPackageName)
                             .put("hubHost", safeHubHost(mHubUrl))
                             .put("tokenPresent", !isBlank(mToken))
+                            .put("sessionGeneration", mSessionGeneration)
                             .put("commandLineSwitches", switches);
             Log.i(TAG, "IP-TEST bridge startup diagnostics: %s", diagnostics.toString());
             addBridgeLog("debug", event, diagnostics.toString());
@@ -445,9 +485,10 @@ public final class IptestBridgeClient {
                     JSONObject response =
                             postJson(
                                     "/api/iptest-browser/" + encode(mSerial) + "/next-command",
-                                    new JSONObject()
-                                            .put("token", mToken)
-                                            .put("timeoutMs", 25000),
+                                            new JSONObject()
+                                                .put("token", mToken)
+                                                .put("sessionGeneration", mSessionGeneration)
+                                                .put("timeoutMs", 25000),
                                     32000);
                     JSONObject command = response.optJSONObject("command");
                     if (command == null) continue;
@@ -467,6 +508,7 @@ public final class IptestBridgeClient {
                 new JSONObject()
                         .put("serial", mSerial)
                         .put("token", mToken)
+                        .put("sessionGeneration", mSessionGeneration)
                         .put("packageName", mPackageName)
                         .put("browserVersion", "ultimatum-native")
                         .put("userAgent", System.getProperty("http.agent", ""))
@@ -525,6 +567,7 @@ public final class IptestBridgeClient {
             case "evaluateInternal":
                 return 20000;
             case "getNativeState":
+            case "getConsentState":
             case "waitForNativeReady":
             case "resetAutomationTab":
             case "bringTaskToFront":
@@ -552,6 +595,8 @@ public final class IptestBridgeClient {
                         payload.optLong("timeoutMs", 8000));
             case "getNativeState":
                 return getNativeState();
+            case "getConsentState":
+                return getConsentState(payload.optLong("timeoutMs", 5000));
             case "waitForNativeReady":
                 return waitForNativeReady(payload.optLong("timeoutMs", 15000));
             case "resetAutomationTab":
@@ -1381,6 +1426,67 @@ public final class IptestBridgeClient {
         }
     }
 
+    private JSONObject getConsentState(long requestedTimeoutMs) throws Exception {
+        long timeoutMs = clamp(requestedTimeoutMs, 1000, 10000);
+        String expression =
+                "(() => {"
+                        + "const norm=(v)=>String(v||'').normalize('NFD')"
+                        + ".replace(/[\\u0300-\\u036f]/g,'').toLowerCase()"
+                        + ".replace(/[^a-z0-9\\s]/g,' ').replace(/\\s+/g,' ').trim();"
+                        + "const positive=["
+                        + "'w porzadku','akceptuje wszystkie','akceptuj wszystkie',"
+                        + "'zaakceptuj wszystkie','zaakceptuj zgody',"
+                        + "'akceptuj wszystkie pliki cookie','zezwol na wszystkie',"
+                        + "'zgoda na wszystko','zgode na wszystko',"
+                        + "'akceptuje i przechodze do serwisu','przejdz do serwisu',"
+                        + "'accept','accept all','allow all','agree','i agree'];"
+                        + "const negative=/(odrzuc|odmow|reject|decline|ustaw|preferenc|manage|configure|konfigur)/;"
+                        + "const nodes=Array.from(document.querySelectorAll("
+                        + "'button,[role=\"button\"],input[type=\"button\"],input[type=\"submit\"],a'));"
+                        + "const candidates=[];"
+                        + "for(const node of nodes){"
+                        + "const r=node.getBoundingClientRect();const s=getComputedStyle(node);"
+                        + "if(r.width<4||r.height<4||s.display==='none'||s.visibility==='hidden'||Number(s.opacity||1)===0)continue;"
+                        + "const label=norm(node.innerText||node.value||node.textContent||node.getAttribute('aria-label'));"
+                        + "if(!label||negative.test(label))continue;"
+                        + "const exact=positive.includes(label);"
+                        + "const contextual=!exact&&positive.some((p)=>label.length<=80&&(label.includes(p)||p.includes(label)));"
+                        + "if(!exact&&!contextual)continue;"
+                        + "const left=Math.max(0,r.left),top=Math.max(0,r.top);"
+                        + "const right=Math.min(innerWidth,r.right),bottom=Math.min(innerHeight,r.bottom);"
+                        + "if(right-left<4||bottom-top<4)continue;"
+                        + "candidates.push({label:String(node.innerText||node.value||node.textContent||node.getAttribute('aria-label')||'').trim().slice(0,120),"
+                        + "normalizedLabel:label,exact,left,top,right,bottom,width:right-left,height:bottom-top});"
+                        + "}"
+                        + "candidates.sort((a,b)=>(Number(b.exact)-Number(a.exact))||((b.width*b.height)-(a.width*a.height)));"
+                        + "const consentWords=/(cookie|ciastecz|zgod|consent|privacy|prywatno|personal data|dane osobowe)/;"
+                        + "const overlay=Array.from(document.querySelectorAll("
+                        + "'[role=\"dialog\"],dialog,[aria-modal=\"true\"],#onetrust-banner-sdk,"
+                        + "[id*=\"cookie\" i],[class*=\"cookie\" i],[id*=\"consent\" i],[class*=\"consent\" i],"
+                        + "[id*=\"cmp\" i],[class*=\"cmp\" i]')).some((node)=>{"
+                        + "const r=node.getBoundingClientRect();const s=getComputedStyle(node);"
+                        + "const modal=node.matches('[role=\"dialog\"],dialog,[aria-modal=\"true\"]');"
+                        + "const text=norm(node.innerText||node.textContent||node.getAttribute('aria-label'));"
+                        + "const positioned=s.position==='fixed'||s.position==='sticky'||modal;"
+                        + "return positioned&&consentWords.test(text)&&r.width>innerWidth*.35"
+                        + "&&r.height>innerHeight*.08&&s.display!=='none'&&s.visibility!=='hidden'"
+                        + "&&Number(s.opacity||1)!==0;});"
+                        + "return {ok:true,url:location.href,readyState:document.readyState,"
+                        + "viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio||1},"
+                        + "bodyTextLength:(document.body&&document.body.innerText||'').length,"
+                        + "primaryCta:candidates[0]||null,primaryCtaCount:candidates.length,"
+                        + "blockingOverlay:overlay,capturedAt:Date.now()};"
+                        + "})()";
+        Object raw = evaluateInternal(expression, timeoutMs);
+        JSONObject result =
+                raw instanceof JSONObject
+                        ? (JSONObject) raw
+                        : new JSONObject().put("ok", false).put("reason", "invalid_consent_state");
+        result.put("nativeState", getNativeState());
+        result.put("sessionGeneration", mSessionGeneration);
+        return result;
+    }
+
     private Object evaluateWithWebContents(String expression, long timeoutMs) throws Exception {
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<String> rawResult = new AtomicReference<>();
@@ -1909,7 +2015,12 @@ public final class IptestBridgeClient {
     private void submitResult(String id, boolean ok, Object result, String error) {
         if (isBlank(id)) return;
         try {
-            JSONObject body = new JSONObject().put("id", id).put("token", mToken).put("ok", ok);
+            JSONObject body =
+                    new JSONObject()
+                            .put("id", id)
+                            .put("token", mToken)
+                            .put("sessionGeneration", mSessionGeneration)
+                            .put("ok", ok);
             if (ok) {
                 body.put("result", result == null ? JSONObject.NULL : result);
             } else {
@@ -1950,6 +2061,10 @@ public final class IptestBridgeClient {
         connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
         connection.setRequestProperty("Accept", "application/json");
         connection.setRequestProperty("X-IPTEST-Browser-Token", mToken);
+        if (!isBlank(mSessionGeneration)) {
+            connection.setRequestProperty(
+                    "X-IPTEST-Browser-Generation", mSessionGeneration);
+        }
         byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
         connection.setFixedLengthStreamingMode(bytes.length);
         try (OutputStream output = connection.getOutputStream()) {
@@ -1959,6 +2074,27 @@ public final class IptestBridgeClient {
         InputStream stream = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
         String response = readAll(stream);
         if (code >= 400) {
+            if (code == 401) {
+                try {
+                    JSONObject errorBody = isBlank(response) ? null : new JSONObject(response);
+                    JSONObject recovery =
+                            errorBody == null
+                                    ? null
+                                    : errorBody.optJSONObject("brokerAuthRecovery");
+                    if (recovery != null
+                            && "re_register".equals(recovery.optString("action", ""))) {
+                        mStopped = true;
+                        addBridgeLog(
+                                "warn",
+                                "auth:stale_session_stopped",
+                                "generation="
+                                        + mSessionGeneration
+                                        + " endpoint="
+                                        + path);
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
             throw new IllegalStateException("HTTP " + code + " " + response);
         }
         return isBlank(response) ? new JSONObject() : new JSONObject(response);
