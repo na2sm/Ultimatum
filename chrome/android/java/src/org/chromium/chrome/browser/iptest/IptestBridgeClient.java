@@ -7,6 +7,9 @@ package org.chromium.chrome.browser.iptest;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
+import android.os.SystemClock;
+import android.view.MotionEvent;
+import android.view.View;
 
 import org.chromium.base.CommandLine;
 import org.chromium.base.Log;
@@ -78,7 +81,7 @@ public final class IptestBridgeClient {
     public static final String EXTRA_SESSION_GENERATION = "iptest_session_generation";
 
     private static final String TAG = "IptestBridgeClient";
-    private static final String BRIDGE_VERSION = "native-v2";
+    private static final String BRIDGE_VERSION = "native-v3";
     private static final String SWITCH_IN_PROCESS_GPU = "in-process-gpu";
     private static final Object LOCK = new Object();
     private static final long START_RETRY_DELAY_MS = 300;
@@ -512,7 +515,12 @@ public final class IptestBridgeClient {
                         .put("packageName", mPackageName)
                         .put("browserVersion", "ultimatum-native")
                         .put("userAgent", System.getProperty("http.agent", ""))
-                        .put("bridgeVersion", BRIDGE_VERSION),
+                        .put("bridgeVersion", BRIDGE_VERSION)
+                        .put(
+                                "capabilities",
+                                new JSONArray()
+                                        .put("nativeConsentStateV1")
+                                        .put("nativeAtomicConsentV1")),
                 10000);
     }
 
@@ -568,6 +576,7 @@ public final class IptestBridgeClient {
                 return 20000;
             case "getNativeState":
             case "getConsentState":
+            case "dismissConsent":
             case "waitForNativeReady":
             case "resetAutomationTab":
             case "bringTaskToFront":
@@ -597,6 +606,8 @@ public final class IptestBridgeClient {
                 return getNativeState();
             case "getConsentState":
                 return getConsentState(payload.optLong("timeoutMs", 5000));
+            case "dismissConsent":
+                return dismissConsent(payload);
             case "waitForNativeReady":
                 return waitForNativeReady(payload.optLong("timeoutMs", 15000));
             case "resetAutomationTab":
@@ -1424,6 +1435,261 @@ public final class IptestBridgeClient {
                             + "; webContentsFallback=disabled",
                     isolatedError);
         }
+    }
+
+    private JSONObject dismissConsent(JSONObject payload) throws Exception {
+        String expectedGeneration = payload.optString("sessionGeneration", "").trim();
+        if (isBlank(expectedGeneration) || !mSessionGeneration.equals(expectedGeneration)) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("dispatched", false)
+                    .put("reason", "session_generation_mismatch")
+                    .put("expectedSessionGeneration", mSessionGeneration)
+                    .put("actualSessionGeneration", expectedGeneration);
+        }
+
+        long timeoutMs = clamp(payload.optLong("timeoutMs", 7000), 2500, 10000);
+        long startedAt = System.currentTimeMillis();
+        JSONObject preState = getConsentState(Math.min(4000, timeoutMs));
+        JSONObject primaryCta = preState.optJSONObject("primaryCta");
+        if (primaryCta == null) {
+            return new JSONObject()
+                    .put("ok", true)
+                    .put("dispatched", false)
+                    .put("reason", "no_target")
+                    .put("sessionGeneration", mSessionGeneration)
+                    .put("preState", preState)
+                    .put("postState", preState)
+                    .put("durationMs", System.currentTimeMillis() - startedAt);
+        }
+
+        JSONObject viewport = preState.optJSONObject("viewport");
+        double viewportWidth = viewport == null ? 0 : viewport.optDouble("width", 0);
+        double viewportHeight = viewport == null ? 0 : viewport.optDouble("height", 0);
+        double left = primaryCta.optDouble("left", Double.NaN);
+        double top = primaryCta.optDouble("top", Double.NaN);
+        double right = primaryCta.optDouble("right", Double.NaN);
+        double bottom = primaryCta.optDouble("bottom", Double.NaN);
+        if (!(viewportWidth > 0)
+                || !(viewportHeight > 0)
+                || !Double.isFinite(left)
+                || !Double.isFinite(top)
+                || !Double.isFinite(right)
+                || !Double.isFinite(bottom)
+                || right <= left
+                || bottom <= top) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("dispatched", false)
+                    .put("reason", "invalid_target_geometry")
+                    .put("sessionGeneration", mSessionGeneration)
+                    .put("preState", preState)
+                    .put("durationMs", System.currentTimeMillis() - startedAt);
+        }
+
+        ChromeTabbedActivity expectedActivity = mActivity.get();
+        Tab expectedTab =
+                expectedActivity == null ? null : expectedActivity.getActivityTab();
+        int expectedOrientation =
+                expectedActivity == null
+                        ? 0
+                        : expectedActivity
+                                .getResources()
+                                .getConfiguration()
+                                .orientation;
+        if (expectedActivity == null
+                || expectedTab == null
+                || expectedTab.getContentView() == null
+                || !expectedActivity.hasWindowFocus()) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("dispatched", false)
+                    .put("reason", "foreground_mismatch")
+                    .put("sessionGeneration", mSessionGeneration)
+                    .put("preState", preState)
+                    .put("durationMs", System.currentTimeMillis() - startedAt);
+        }
+
+        CountDownLatch touchLatch = new CountDownLatch(1);
+        AtomicReference<JSONObject> dispatchResult = new AtomicReference<>();
+        ThreadUtils.postOnUiThread(
+                () -> {
+                    try {
+                        ChromeTabbedActivity activity = mActivity.get();
+                        Tab tab = activity == null ? null : activity.getActivityTab();
+                        View contentView = tab == null ? null : tab.getContentView();
+                        int orientation =
+                                activity == null
+                                        ? 0
+                                        : activity
+                                                .getResources()
+                                                .getConfiguration()
+                                                .orientation;
+                        if (activity != expectedActivity
+                                || tab == null
+                                || tab.getId() != expectedTab.getId()
+                                || contentView == null
+                                || !contentView.isShown()
+                                || !activity.hasWindowFocus()) {
+                            dispatchResult.set(
+                                    new JSONObject()
+                                            .put("ok", false)
+                                            .put("dispatched", false)
+                                            .put("reason", "foreground_changed_before_dispatch"));
+                            return;
+                        }
+                        if (orientation != expectedOrientation) {
+                            dispatchResult.set(
+                                    new JSONObject()
+                                            .put("ok", false)
+                                            .put("dispatched", false)
+                                            .put("reason", "orientation_changed_before_dispatch"));
+                            return;
+                        }
+
+                        int viewWidth = contentView.getWidth();
+                        int viewHeight = contentView.getHeight();
+                        if (viewWidth <= 4 || viewHeight <= 4) {
+                            dispatchResult.set(
+                                    new JSONObject()
+                                            .put("ok", false)
+                                            .put("dispatched", false)
+                                            .put("reason", "content_view_not_laid_out"));
+                            return;
+                        }
+
+                        double scaleX = viewWidth / viewportWidth;
+                        double scaleY = viewHeight / viewportHeight;
+                        double mappedLeft = Math.max(2, Math.min(viewWidth - 3, left * scaleX));
+                        double mappedRight = Math.max(2, Math.min(viewWidth - 3, right * scaleX));
+                        double mappedTop = Math.max(2, Math.min(viewHeight - 3, top * scaleY));
+                        double mappedBottom = Math.max(2, Math.min(viewHeight - 3, bottom * scaleY));
+                        double jitterX =
+                                (Math.random() - 0.5)
+                                        * Math.min(12, Math.max(2, (mappedRight - mappedLeft) * 0.12));
+                        double jitterY =
+                                (Math.random() - 0.5)
+                                        * Math.min(10, Math.max(2, (mappedBottom - mappedTop) * 0.12));
+                        float touchX =
+                                (float)
+                                        Math.max(
+                                                mappedLeft + 2,
+                                                Math.min(
+                                                        mappedRight - 2,
+                                                        (mappedLeft + mappedRight) / 2 + jitterX));
+                        float touchY =
+                                (float)
+                                        Math.max(
+                                                mappedTop + 2,
+                                                Math.min(
+                                                        mappedBottom - 2,
+                                                        (mappedTop + mappedBottom) / 2 + jitterY));
+                        long downTime = SystemClock.uptimeMillis();
+                        MotionEvent down =
+                                MotionEvent.obtain(
+                                        downTime,
+                                        downTime,
+                                        MotionEvent.ACTION_DOWN,
+                                        touchX,
+                                        touchY,
+                                        0);
+                        MotionEvent up =
+                                MotionEvent.obtain(
+                                        downTime,
+                                        downTime + 70,
+                                        MotionEvent.ACTION_UP,
+                                        touchX,
+                                        touchY,
+                                        0);
+                        boolean downHandled = contentView.dispatchTouchEvent(down);
+                        boolean upHandled = contentView.dispatchTouchEvent(up);
+                        down.recycle();
+                        up.recycle();
+                        int[] screenLocation = new int[2];
+                        contentView.getLocationOnScreen(screenLocation);
+                        dispatchResult.set(
+                                new JSONObject()
+                                        .put("ok", true)
+                                        .put("dispatched", downHandled || upHandled)
+                                        .put(
+                                                "reason",
+                                                downHandled || upHandled
+                                                        ? "motion_event_dispatched"
+                                                        : "motion_event_not_handled")
+                                        .put(
+                                                "touchPoint",
+                                                new JSONObject()
+                                                        .put("viewX", touchX)
+                                                        .put("viewY", touchY)
+                                                        .put("screenX", screenLocation[0] + touchX)
+                                                        .put("screenY", screenLocation[1] + touchY))
+                                        .put(
+                                                "mapping",
+                                                new JSONObject()
+                                                        .put("viewportWidth", viewportWidth)
+                                                        .put("viewportHeight", viewportHeight)
+                                                        .put("viewWidth", viewWidth)
+                                                        .put("viewHeight", viewHeight)
+                                                        .put("scaleX", scaleX)
+                                                        .put("scaleY", scaleY)
+                                                        .put("orientation", orientation)));
+                    } catch (Throwable t) {
+                        dispatchResult.set(
+                                new JSONObject()
+                                        .put("ok", false)
+                                        .put("dispatched", false)
+                                        .put("reason", "motion_event_exception")
+                                        .put("error", t.toString()));
+                    } finally {
+                        touchLatch.countDown();
+                    }
+                });
+
+        if (!touchLatch.await(Math.min(2500, timeoutMs), TimeUnit.MILLISECONDS)) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("dispatched", false)
+                    .put("reason", "motion_event_timeout")
+                    .put("sessionGeneration", mSessionGeneration)
+                    .put("preState", preState)
+                    .put("durationMs", System.currentTimeMillis() - startedAt);
+        }
+        JSONObject dispatch = dispatchResult.get();
+        if (dispatch == null || !dispatch.optBoolean("dispatched", false)) {
+            if (dispatch == null) dispatch = new JSONObject().put("reason", "missing_dispatch_result");
+            dispatch.put("sessionGeneration", mSessionGeneration);
+            dispatch.put("preState", preState);
+            dispatch.put("durationMs", System.currentTimeMillis() - startedAt);
+            return dispatch;
+        }
+
+        sleep(Math.min(800, Math.max(350, timeoutMs - (System.currentTimeMillis() - startedAt) - 1000)));
+        JSONObject postState =
+                getConsentState(
+                        Math.max(
+                                1000,
+                                Math.min(
+                                        3500,
+                                        timeoutMs - (System.currentTimeMillis() - startedAt))));
+        JSONObject postCta = postState.optJSONObject("primaryCta");
+        boolean renderChanged =
+                postCta == null
+                        || postState.optBoolean("blockingOverlay", true)
+                                != preState.optBoolean("blockingOverlay", true)
+                        || !postState.optString("url", "")
+                                .equals(preState.optString("url", ""))
+                        || postState.optInt("bodyTextLength", -1)
+                                != preState.optInt("bodyTextLength", -1);
+        dispatch.put("sessionGeneration", mSessionGeneration);
+        dispatch.put("label", primaryCta.optString("label", ""));
+        dispatch.put("rect", primaryCta);
+        dispatch.put("url", preState.optString("url", ""));
+        dispatch.put("preState", preState);
+        dispatch.put("postState", postState);
+        dispatch.put("renderChanged", renderChanged);
+        dispatch.put("noEffect", !renderChanged);
+        dispatch.put("durationMs", System.currentTimeMillis() - startedAt);
+        return dispatch;
     }
 
     private JSONObject getConsentState(long requestedTimeoutMs) throws Exception {
