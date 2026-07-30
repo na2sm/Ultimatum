@@ -1634,12 +1634,17 @@ public final class IptestBridgeClient {
                                                         .put("scaleY", scaleY)
                                                         .put("orientation", orientation)));
                     } catch (Throwable t) {
-                        dispatchResult.set(
-                                new JSONObject()
-                                        .put("ok", false)
-                                        .put("dispatched", false)
-                                        .put("reason", "motion_event_exception")
-                                        .put("error", t.toString()));
+                        JSONObject errorResult = new JSONObject();
+                        try {
+                            errorResult
+                                    .put("ok", false)
+                                    .put("dispatched", false)
+                                    .put("reason", "motion_event_exception")
+                                    .put("error", t.toString());
+                        } catch (Exception jsonError) {
+                            Log.e(TAG, "Failed to serialize MotionEvent exception", jsonError);
+                        }
+                        dispatchResult.set(errorResult);
                     } finally {
                         touchLatch.countDown();
                     }
