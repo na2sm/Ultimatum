@@ -1462,6 +1462,30 @@ public final class IptestBridgeClient {
                     .put("postState", preState)
                     .put("durationMs", System.currentTimeMillis() - startedAt);
         }
+        String expectedTargetLabel =
+                payload.optString("targetLabelNormalized", "").trim().toLowerCase();
+        String actualTargetLabel =
+                primaryCta.optString("normalizedLabel", "").trim().toLowerCase();
+        boolean targetLabelMatches =
+                isBlank(expectedTargetLabel)
+                        || actualTargetLabel.equals(expectedTargetLabel)
+                        || (actualTargetLabel.length() >= 5
+                                && expectedTargetLabel.length() >= 5
+                                && (actualTargetLabel.contains(expectedTargetLabel)
+                                        || expectedTargetLabel.contains(actualTargetLabel)));
+        if (!targetLabelMatches) {
+            return new JSONObject()
+                    .put("ok", true)
+                    .put("dispatched", false)
+                    .put("reason", "target_label_mismatch")
+                    .put("targetLabel", primaryCta.optString("label", ""))
+                    .put("targetLabelNormalized", actualTargetLabel)
+                    .put("expectedTargetLabelNormalized", expectedTargetLabel)
+                    .put("sessionGeneration", mSessionGeneration)
+                    .put("preState", preState)
+                    .put("postState", preState)
+                    .put("durationMs", System.currentTimeMillis() - startedAt);
+        }
 
         JSONObject viewport = preState.optJSONObject("viewport");
         double viewportWidth = viewport == null ? 0 : viewport.optDouble("width", 0);
@@ -1750,7 +1774,7 @@ public final class IptestBridgeClient {
                         + "const label=norm(node.innerText||node.value||node.textContent||node.getAttribute('aria-label'));"
                         + "if(!label||negative.test(label))continue;"
                         + "const exact=positive.includes(label);"
-                        + "const contextual=!exact&&positive.some((p)=>label.length<=80&&(label.includes(p)||p.includes(label)));"
+                        + "const contextual=!exact&&label.length>=5&&positive.some((p)=>label.length<=80&&(label.includes(p)||p.includes(label)));"
                         + "if(!exact&&!contextual)continue;"
                         + "const left=Math.max(0,r.left),top=Math.max(0,r.top);"
                         + "const right=Math.min(innerWidth,r.right),bottom=Math.min(innerHeight,r.bottom);"
