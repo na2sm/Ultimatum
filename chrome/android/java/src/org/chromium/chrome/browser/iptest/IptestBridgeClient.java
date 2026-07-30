@@ -8,6 +8,7 @@ import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
 import android.os.SystemClock;
+import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -1620,43 +1621,49 @@ public final class IptestBridgeClient {
                         double jitterY =
                                 (Math.random() - 0.5)
                                         * Math.min(10, Math.max(2, (mappedBottom - mappedTop) * 0.12));
-                        float touchX =
+                        float viewTouchX =
                                 (float)
                                         Math.max(
                                                 mappedLeft + 2,
                                                 Math.min(
                                                         mappedRight - 2,
                                                         (mappedLeft + mappedRight) / 2 + jitterX));
-                        float touchY =
+                        float viewTouchY =
                                 (float)
                                         Math.max(
                                                 mappedTop + 2,
                                                 Math.min(
                                                         mappedBottom - 2,
                                                         (mappedTop + mappedBottom) / 2 + jitterY));
+                        int[] windowLocation = new int[2];
+                        int[] screenLocation = new int[2];
+                        contentView.getLocationInWindow(windowLocation);
+                        contentView.getLocationOnScreen(screenLocation);
+                        float windowTouchX = windowLocation[0] + viewTouchX;
+                        float windowTouchY = windowLocation[1] + viewTouchY;
                         long downTime = SystemClock.uptimeMillis();
                         MotionEvent down =
                                 MotionEvent.obtain(
                                         downTime,
                                         downTime,
                                         MotionEvent.ACTION_DOWN,
-                                        touchX,
-                                        touchY,
+                                        windowTouchX,
+                                        windowTouchY,
                                         0);
                         MotionEvent up =
                                 MotionEvent.obtain(
                                         downTime,
                                         downTime + 70,
                                         MotionEvent.ACTION_UP,
-                                        touchX,
-                                        touchY,
+                                        windowTouchX,
+                                        windowTouchY,
                                         0);
-                        boolean downHandled = contentView.dispatchTouchEvent(down);
-                        boolean upHandled = contentView.dispatchTouchEvent(up);
+                        down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+                        up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+                        boolean downHandled = activity.dispatchTouchEvent(down);
+                        boolean upHandled = activity.dispatchTouchEvent(up);
                         down.recycle();
                         up.recycle();
-                        int[] screenLocation = new int[2];
-                        contentView.getLocationOnScreen(screenLocation);
                         dispatchResult.set(
                                 new JSONObject()
                                         .put("ok", true)
@@ -1669,17 +1676,36 @@ public final class IptestBridgeClient {
                                         .put(
                                                 "touchPoint",
                                                 new JSONObject()
-                                                        .put("viewX", touchX)
-                                                        .put("viewY", touchY)
-                                                        .put("screenX", screenLocation[0] + touchX)
-                                                        .put("screenY", screenLocation[1] + touchY))
+                                                        .put("viewX", viewTouchX)
+                                                        .put("viewY", viewTouchY)
+                                                        .put("windowX", windowTouchX)
+                                                        .put("windowY", windowTouchY)
+                                                        .put(
+                                                                "screenX",
+                                                                screenLocation[0] + viewTouchX)
+                                                        .put(
+                                                                "screenY",
+                                                                screenLocation[1] + viewTouchY))
                                         .put(
                                                 "mapping",
                                                 new JSONObject()
+                                                        .put("dispatcher", "activity_window")
                                                         .put("viewportWidth", viewportWidth)
                                                         .put("viewportHeight", viewportHeight)
                                                         .put("viewWidth", viewWidth)
                                                         .put("viewHeight", viewHeight)
+                                                        .put(
+                                                                "contentViewWindowX",
+                                                                windowLocation[0])
+                                                        .put(
+                                                                "contentViewWindowY",
+                                                                windowLocation[1])
+                                                        .put(
+                                                                "contentViewScreenX",
+                                                                screenLocation[0])
+                                                        .put(
+                                                                "contentViewScreenY",
+                                                                screenLocation[1])
                                                         .put("scaleX", scaleX)
                                                         .put("scaleY", scaleY)
                                                         .put("orientation", orientation)));
