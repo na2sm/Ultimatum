@@ -1487,28 +1487,53 @@ public final class IptestBridgeClient {
                     .put("durationMs", System.currentTimeMillis() - startedAt);
         }
 
-        ChromeTabbedActivity expectedActivity = mActivity.get();
-        Tab expectedTab =
-                expectedActivity == null ? null : expectedActivity.getActivityTab();
-        int expectedOrientation =
-                expectedActivity == null
-                        ? 0
-                        : expectedActivity
-                                .getResources()
-                                .getConfiguration()
-                                .orientation;
-        if (expectedActivity == null
-                || expectedTab == null
-                || expectedTab.getContentView() == null
-                || !expectedActivity.hasWindowFocus()) {
-            return new JSONObject()
-                    .put("ok", false)
-                    .put("dispatched", false)
-                    .put("reason", "foreground_mismatch")
-                    .put("sessionGeneration", mSessionGeneration)
-                    .put("preState", preState)
-                    .put("durationMs", System.currentTimeMillis() - startedAt);
+        JSONObject uiPreflight =
+                ThreadUtils.runOnUiThreadBlocking(
+                        () -> {
+                            JSONObject output = new JSONObject();
+                            try {
+                                ChromeTabbedActivity activity = mActivity.get();
+                                Tab tab = activity == null ? null : activity.getActivityTab();
+                                View contentView = tab == null ? null : tab.getContentView();
+                                if (activity == null
+                                        || tab == null
+                                        || contentView == null
+                                        || !contentView.isShown()
+                                        || !activity.hasWindowFocus()) {
+                                    return output
+                                            .put("ok", false)
+                                            .put("dispatched", false)
+                                            .put("reason", "foreground_mismatch");
+                                }
+                                return output
+                                        .put("ok", true)
+                                        .put(
+                                                "activityIdentity",
+                                                System.identityHashCode(activity))
+                                        .put("tabId", tab.getId())
+                                        .put(
+                                                "orientation",
+                                                activity
+                                                        .getResources()
+                                                        .getConfiguration()
+                                                        .orientation);
+                            } catch (Throwable t) {
+                                return output
+                                        .put("ok", false)
+                                        .put("dispatched", false)
+                                        .put("reason", "foreground_preflight_exception")
+                                        .put("error", t.toString());
+                            }
+                        });
+        if (!uiPreflight.optBoolean("ok", false)) {
+            uiPreflight.put("sessionGeneration", mSessionGeneration);
+            uiPreflight.put("preState", preState);
+            uiPreflight.put("durationMs", System.currentTimeMillis() - startedAt);
+            return uiPreflight;
         }
+        int expectedActivityIdentity = uiPreflight.optInt("activityIdentity", 0);
+        int expectedTabId = uiPreflight.optInt("tabId", -1);
+        int expectedOrientation = uiPreflight.optInt("orientation", 0);
 
         CountDownLatch touchLatch = new CountDownLatch(1);
         AtomicReference<JSONObject> dispatchResult = new AtomicReference<>();
@@ -1525,9 +1550,10 @@ public final class IptestBridgeClient {
                                                 .getResources()
                                                 .getConfiguration()
                                                 .orientation;
-                        if (activity != expectedActivity
+                        if (activity == null
+                                || System.identityHashCode(activity) != expectedActivityIdentity
                                 || tab == null
-                                || tab.getId() != expectedTab.getId()
+                                || tab.getId() != expectedTabId
                                 || contentView == null
                                 || !contentView.isShown()
                                 || !activity.hasWindowFocus()) {
