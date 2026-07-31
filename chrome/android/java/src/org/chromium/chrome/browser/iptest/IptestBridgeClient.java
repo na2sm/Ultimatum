@@ -1567,6 +1567,7 @@ public final class IptestBridgeClient {
                     try {
                         ChromeTabbedActivity activity = mActivity.get();
                         Tab tab = activity == null ? null : activity.getActivityTab();
+                        WebContents webContents = tab == null ? null : tab.getWebContents();
                         View contentView = tab == null ? null : tab.getContentView();
                         int orientation =
                                 activity == null
@@ -1579,6 +1580,7 @@ public final class IptestBridgeClient {
                                 || System.identityHashCode(activity) != expectedActivityIdentity
                                 || tab == null
                                 || tab.getId() != expectedTabId
+                                || webContents == null
                                 || contentView == null
                                 || !contentView.isShown()
                                 || !activity.hasWindowFocus()) {
@@ -1635,33 +1637,31 @@ public final class IptestBridgeClient {
                                                 Math.min(
                                                         mappedBottom - 2,
                                                         (mappedTop + mappedBottom) / 2 + jitterY));
-                        int[] windowLocation = new int[2];
                         int[] screenLocation = new int[2];
-                        contentView.getLocationInWindow(windowLocation);
                         contentView.getLocationOnScreen(screenLocation);
-                        float windowTouchX = windowLocation[0] + viewTouchX;
-                        float windowTouchY = windowLocation[1] + viewTouchY;
                         long downTime = SystemClock.uptimeMillis();
                         MotionEvent down =
                                 MotionEvent.obtain(
                                         downTime,
                                         downTime,
                                         MotionEvent.ACTION_DOWN,
-                                        windowTouchX,
-                                        windowTouchY,
+                                        viewTouchX,
+                                        viewTouchY,
                                         0);
                         MotionEvent up =
                                 MotionEvent.obtain(
                                         downTime,
                                         downTime + 70,
                                         MotionEvent.ACTION_UP,
-                                        windowTouchX,
-                                        windowTouchY,
+                                        viewTouchX,
+                                        viewTouchY,
                                         0);
                         down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
                         up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-                        boolean downHandled = activity.dispatchTouchEvent(down);
-                        boolean upHandled = activity.dispatchTouchEvent(up);
+                        boolean downHandled =
+                                webContents.getEventForwarder().onTouchEvent(down);
+                        boolean upHandled =
+                                webContents.getEventForwarder().onTouchEvent(up);
                         down.recycle();
                         up.recycle();
                         dispatchResult.set(
@@ -1678,8 +1678,6 @@ public final class IptestBridgeClient {
                                                 new JSONObject()
                                                         .put("viewX", viewTouchX)
                                                         .put("viewY", viewTouchY)
-                                                        .put("windowX", windowTouchX)
-                                                        .put("windowY", windowTouchY)
                                                         .put(
                                                                 "screenX",
                                                                 screenLocation[0] + viewTouchX)
@@ -1689,17 +1687,11 @@ public final class IptestBridgeClient {
                                         .put(
                                                 "mapping",
                                                 new JSONObject()
-                                                        .put("dispatcher", "activity_window")
+                                                        .put("dispatcher", "chromium_event_forwarder")
                                                         .put("viewportWidth", viewportWidth)
                                                         .put("viewportHeight", viewportHeight)
                                                         .put("viewWidth", viewWidth)
                                                         .put("viewHeight", viewHeight)
-                                                        .put(
-                                                                "contentViewWindowX",
-                                                                windowLocation[0])
-                                                        .put(
-                                                                "contentViewWindowY",
-                                                                windowLocation[1])
                                                         .put(
                                                                 "contentViewScreenX",
                                                                 screenLocation[0])
