@@ -88,6 +88,7 @@ public final class IptestBridgeClient {
     private static final long START_RETRY_DELAY_MS = 300;
     private static final long START_RETRY_DEADLINE_MS = 60000;
     private static final long NAVIGATION_COMMITTED_SETTLE_MS = 2500;
+    private static final long NATIVE_CONSENT_TOUCH_DURATION_MS = 70;
     private static final Pattern FINGERPRINT_CONSOLE_IDS =
             Pattern.compile("([A-Za-z0-9_.:-]{12,160})\\s+([A-Za-z0-9_-]{12,128})");
 
@@ -1537,6 +1538,9 @@ public final class IptestBridgeClient {
                                                 System.identityHashCode(activity))
                                         .put("tabId", tab.getId())
                                         .put(
+                                                "contentViewIdentity",
+                                                System.identityHashCode(contentView))
+                                        .put(
                                                 "orientation",
                                                 activity
                                                         .getResources()
@@ -1558,10 +1562,12 @@ public final class IptestBridgeClient {
         }
         int expectedActivityIdentity = uiPreflight.optInt("activityIdentity", 0);
         int expectedTabId = uiPreflight.optInt("tabId", -1);
+        int expectedContentViewIdentity = uiPreflight.optInt("contentViewIdentity", 0);
         int expectedOrientation = uiPreflight.optInt("orientation", 0);
 
         CountDownLatch touchLatch = new CountDownLatch(1);
         AtomicReference<JSONObject> dispatchResult = new AtomicReference<>();
+        AtomicBoolean delayedUpScheduled = new AtomicBoolean(false);
         ThreadUtils.postOnUiThread(
                 () -> {
                     try {
@@ -1648,59 +1654,150 @@ public final class IptestBridgeClient {
                                         viewTouchX,
                                         viewTouchY,
                                         0);
-                        MotionEvent up =
-                                MotionEvent.obtain(
-                                        downTime,
-                                        downTime + 70,
-                                        MotionEvent.ACTION_UP,
-                                        viewTouchX,
-                                        viewTouchY,
-                                        0);
                         down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-                        up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-                        boolean downHandled =
-                                webContents.getEventForwarder().onTouchEvent(down);
-                        boolean upHandled =
-                                webContents.getEventForwarder().onTouchEvent(up);
+                        boolean downHandled = contentView.dispatchTouchEvent(down);
                         down.recycle();
-                        up.recycle();
-                        dispatchResult.set(
-                                new JSONObject()
-                                        .put("ok", true)
-                                        .put("dispatched", downHandled || upHandled)
-                                        .put(
-                                                "reason",
-                                                downHandled || upHandled
-                                                        ? "motion_event_dispatched"
-                                                        : "motion_event_not_handled")
-                                        .put(
-                                                "touchPoint",
+                        View dispatchContentView = contentView;
+                        ThreadUtils.postOnUiThreadDelayed(
+                                () -> {
+                                    try {
+                                        ChromeTabbedActivity dispatchActivity = mActivity.get();
+                                        Tab dispatchTab =
+                                                dispatchActivity == null
+                                                        ? null
+                                                        : dispatchActivity.getActivityTab();
+                                        View currentContentView =
+                                                dispatchTab == null
+                                                        ? null
+                                                        : dispatchTab.getContentView();
+                                        int dispatchOrientation =
+                                                dispatchActivity == null
+                                                        ? 0
+                                                        : dispatchActivity
+                                                                .getResources()
+                                                                .getConfiguration()
+                                                                .orientation;
+                                        if (dispatchActivity == null
+                                                || System.identityHashCode(dispatchActivity)
+                                                        != expectedActivityIdentity
+                                                || dispatchTab == null
+                                                || dispatchTab.getId() != expectedTabId
+                                                || currentContentView == null
+                                                || currentContentView != dispatchContentView
+                                                || System.identityHashCode(currentContentView)
+                                                        != expectedContentViewIdentity
+                                                || !currentContentView.isShown()
+                                                || !dispatchActivity.hasWindowFocus()) {
+                                            dispatchResult.set(
+                                                    new JSONObject()
+                                                            .put("ok", false)
+                                                            .put("dispatched", false)
+                                                            .put(
+                                                                    "reason",
+                                                                    "foreground_changed_before_touch_up"));
+                                            return;
+                                        }
+                                        if (dispatchOrientation != expectedOrientation) {
+                                            dispatchResult.set(
+                                                    new JSONObject()
+                                                            .put("ok", false)
+                                                            .put("dispatched", false)
+                                                            .put(
+                                                                    "reason",
+                                                                    "orientation_changed_before_touch_up"));
+                                            return;
+                                        }
+                                        long upTime = SystemClock.uptimeMillis();
+                                        MotionEvent up =
+                                                MotionEvent.obtain(
+                                                        downTime,
+                                                        upTime,
+                                                        MotionEvent.ACTION_UP,
+                                                        viewTouchX,
+                                                        viewTouchY,
+                                                        0);
+                                        up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+                                        boolean upHandled =
+                                                dispatchContentView.dispatchTouchEvent(up);
+                                        up.recycle();
+                                        boolean dispatched = downHandled && upHandled;
+                                        dispatchResult.set(
                                                 new JSONObject()
-                                                        .put("viewX", viewTouchX)
-                                                        .put("viewY", viewTouchY)
+                                                        .put("ok", true)
+                                                        .put("dispatched", dispatched)
                                                         .put(
-                                                                "screenX",
-                                                                screenLocation[0] + viewTouchX)
+                                                                "reason",
+                                                                dispatched
+                                                                        ? "motion_event_dispatched"
+                                                                        : "motion_event_not_handled")
+                                                        .put("downHandled", downHandled)
+                                                        .put("upHandled", upHandled)
                                                         .put(
-                                                                "screenY",
-                                                                screenLocation[1] + viewTouchY))
-                                        .put(
-                                                "mapping",
-                                                new JSONObject()
-                                                        .put("dispatcher", "chromium_event_forwarder")
-                                                        .put("viewportWidth", viewportWidth)
-                                                        .put("viewportHeight", viewportHeight)
-                                                        .put("viewWidth", viewWidth)
-                                                        .put("viewHeight", viewHeight)
+                                                                "touchDurationMs",
+                                                                upTime - downTime)
                                                         .put(
-                                                                "contentViewScreenX",
-                                                                screenLocation[0])
+                                                                "touchPoint",
+                                                                new JSONObject()
+                                                                        .put("viewX", viewTouchX)
+                                                                        .put("viewY", viewTouchY)
+                                                                        .put(
+                                                                                "screenX",
+                                                                                screenLocation[0]
+                                                                                        + viewTouchX)
+                                                                        .put(
+                                                                                "screenY",
+                                                                                screenLocation[1]
+                                                                                        + viewTouchY))
                                                         .put(
-                                                                "contentViewScreenY",
-                                                                screenLocation[1])
-                                                        .put("scaleX", scaleX)
-                                                        .put("scaleY", scaleY)
-                                                        .put("orientation", orientation)));
+                                                                "mapping",
+                                                                new JSONObject()
+                                                                        .put(
+                                                                                "dispatcher",
+                                                                                "content_view_dispatch_touch_event")
+                                                                        .put(
+                                                                                "viewportWidth",
+                                                                                viewportWidth)
+                                                                        .put(
+                                                                                "viewportHeight",
+                                                                                viewportHeight)
+                                                                        .put(
+                                                                                "viewWidth",
+                                                                                viewWidth)
+                                                                        .put(
+                                                                                "viewHeight",
+                                                                                viewHeight)
+                                                                        .put(
+                                                                                "contentViewScreenX",
+                                                                                screenLocation[0])
+                                                                        .put(
+                                                                                "contentViewScreenY",
+                                                                                screenLocation[1])
+                                                                        .put("scaleX", scaleX)
+                                                                        .put("scaleY", scaleY)
+                                                                        .put(
+                                                                                "orientation",
+                                                                                dispatchOrientation)));
+                                    } catch (Throwable t) {
+                                        JSONObject errorResult = new JSONObject();
+                                        try {
+                                            errorResult
+                                                    .put("ok", false)
+                                                    .put("dispatched", false)
+                                                    .put("reason", "motion_event_up_exception")
+                                                    .put("error", t.toString());
+                                        } catch (Exception jsonError) {
+                                            Log.e(
+                                                    TAG,
+                                                    "Failed to serialize MotionEvent up exception",
+                                                    jsonError);
+                                        }
+                                        dispatchResult.set(errorResult);
+                                    } finally {
+                                        touchLatch.countDown();
+                                    }
+                                },
+                                NATIVE_CONSENT_TOUCH_DURATION_MS);
+                        delayedUpScheduled.set(true);
                     } catch (Throwable t) {
                         JSONObject errorResult = new JSONObject();
                         try {
@@ -1714,7 +1811,7 @@ public final class IptestBridgeClient {
                         }
                         dispatchResult.set(errorResult);
                     } finally {
-                        touchLatch.countDown();
+                        if (!delayedUpScheduled.get()) touchLatch.countDown();
                     }
                 });
 
