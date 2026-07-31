@@ -8,7 +8,6 @@ import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
 import android.os.SystemClock;
-import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -30,7 +29,9 @@ import org.chromium.chrome.browser.tabmodel.TabModelUtils;
 import org.chromium.chrome.browser.browsing_data.TimePeriod;
 import org.chromium.components.browsing_data.content.BrowsingDataInfo;
 import org.chromium.components.browsing_data.content.BrowsingDataModel;
+import org.chromium.content.browser.MotionEventAction;
 import org.chromium.content_public.browser.LoadUrlParams;
+import org.chromium.content_public.browser.MotionEventSynthesizer;
 import org.chromium.content_public.browser.NavigationHandle;
 import org.chromium.content_public.browser.RenderFrameHost;
 import org.chromium.content_public.browser.WebContents;
@@ -1646,18 +1647,18 @@ public final class IptestBridgeClient {
                         int[] screenLocation = new int[2];
                         contentView.getLocationOnScreen(screenLocation);
                         long downTime = SystemClock.uptimeMillis();
-                        MotionEvent down =
-                                MotionEvent.obtain(
-                                        downTime,
-                                        downTime,
-                                        MotionEvent.ACTION_DOWN,
-                                        viewTouchX,
-                                        viewTouchY,
-                                        0);
-                        down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-                        boolean downHandled = contentView.dispatchTouchEvent(down);
-                        down.recycle();
+                        MotionEventSynthesizer synthesizer =
+                                MotionEventSynthesizer.create(contentView);
+                        synthesizer.setPointer(
+                                0,
+                                viewTouchX,
+                                viewTouchY,
+                                0,
+                                MotionEvent.TOOL_TYPE_FINGER);
+                        synthesizer.inject(
+                                MotionEventAction.START, 1, 0, downTime);
                         View dispatchContentView = contentView;
+                        MotionEventSynthesizer dispatchSynthesizer = synthesizer;
                         ThreadUtils.postOnUiThreadDelayed(
                                 () -> {
                                     try {
@@ -1708,30 +1709,16 @@ public final class IptestBridgeClient {
                                             return;
                                         }
                                         long upTime = SystemClock.uptimeMillis();
-                                        MotionEvent up =
-                                                MotionEvent.obtain(
-                                                        downTime,
-                                                        upTime,
-                                                        MotionEvent.ACTION_UP,
-                                                        viewTouchX,
-                                                        viewTouchY,
-                                                        0);
-                                        up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-                                        boolean upHandled =
-                                                dispatchContentView.dispatchTouchEvent(up);
-                                        up.recycle();
-                                        boolean dispatched = downHandled && upHandled;
+                                        dispatchSynthesizer.inject(
+                                                MotionEventAction.END, 1, 0, upTime);
                                         dispatchResult.set(
                                                 new JSONObject()
                                                         .put("ok", true)
-                                                        .put("dispatched", dispatched)
+                                                        .put("dispatched", true)
+                                                        .put("reason", "motion_event_synthesized")
                                                         .put(
-                                                                "reason",
-                                                                dispatched
-                                                                        ? "motion_event_dispatched"
-                                                                        : "motion_event_not_handled")
-                                                        .put("downHandled", downHandled)
-                                                        .put("upHandled", upHandled)
+                                                                "pointerToolType",
+                                                                MotionEvent.TOOL_TYPE_FINGER)
                                                         .put(
                                                                 "touchDurationMs",
                                                                 upTime - downTime)
@@ -1753,7 +1740,7 @@ public final class IptestBridgeClient {
                                                                 new JSONObject()
                                                                         .put(
                                                                                 "dispatcher",
-                                                                                "content_view_dispatch_touch_event")
+                                                                                "chromium_motion_event_synthesizer")
                                                                         .put(
                                                                                 "viewportWidth",
                                                                                 viewportWidth)
