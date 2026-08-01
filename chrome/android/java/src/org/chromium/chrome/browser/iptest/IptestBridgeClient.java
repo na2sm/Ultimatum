@@ -1651,12 +1651,15 @@ public final class IptestBridgeClient {
                                                                         .put("viewHeight", contentView.getHeight())
                                                                         .put("orientation", currentOrientation)));
                                     } catch (Throwable t) {
-                                        dispatchResult.set(
-                                                new JSONObject()
-                                                        .put("ok", false)
-                                                        .put("dispatched", false)
-                                                        .put("reason", "motion_event_up_exception")
-                                                        .put("error", t.toString()));
+                                        try {
+                                            dispatchResult.set(
+                                                    new JSONObject()
+                                                            .put("ok", false)
+                                                            .put("dispatched", false)
+                                                            .put("reason", "motion_event_up_exception")
+                                                            .put("error", t.toString()));
+                                        } catch (Exception ignored) {
+                                        }
                                     } finally {
                                         touchLatch.countDown();
                                     }
