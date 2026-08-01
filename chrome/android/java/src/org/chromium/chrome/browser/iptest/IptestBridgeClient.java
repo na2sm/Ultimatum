@@ -7,6 +7,7 @@ package org.chromium.chrome.browser.iptest;
 import android.app.ActivityManager;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Point;
 import android.os.SystemClock;
 import android.view.MotionEvent;
 import android.view.View;
@@ -83,7 +84,7 @@ public final class IptestBridgeClient {
     public static final String EXTRA_SESSION_GENERATION = "iptest_session_generation";
 
     private static final String TAG = "IptestBridgeClient";
-    private static final String BRIDGE_VERSION = "native-v3";
+    private static final String BRIDGE_VERSION = "native-v4";
     private static final String SWITCH_IN_PROCESS_GPU = "in-process-gpu";
     private static final Object LOCK = new Object();
     private static final long START_RETRY_DELAY_MS = 300;
@@ -118,6 +119,8 @@ public final class IptestBridgeClient {
     private volatile String mLastKnownUrl = "";
     private volatile String mLastNavigationEvent = "";
     private volatile String mLastNavigationError = "";
+    private volatile long mLastConsentEvidenceEpoch = -1;
+    private volatile String mLastConsentEvidenceHash = "";
     private volatile String mLastCrash = "";
     private volatile JSONObject mLastFingerprintVisitorEvidence;
     private Tab mObservedTab;
@@ -523,7 +526,8 @@ public final class IptestBridgeClient {
                                 "capabilities",
                                 new JSONArray()
                                         .put("nativeConsentStateV1")
-                                        .put("nativeAtomicConsentV1")),
+                                        .put("nativeAtomicConsentV1")
+                                        .put("nativeAtomicConsentRectV2")),
                 10000);
     }
 
@@ -580,6 +584,7 @@ public final class IptestBridgeClient {
             case "getNativeState":
             case "getConsentState":
             case "dismissConsent":
+            case "dismissConsentRect":
             case "waitForNativeReady":
             case "resetAutomationTab":
             case "bringTaskToFront":
@@ -611,6 +616,8 @@ public final class IptestBridgeClient {
                 return getConsentState(payload.optLong("timeoutMs", 5000));
             case "dismissConsent":
                 return dismissConsent(payload);
+            case "dismissConsentRect":
+                return dismissConsentRect(payload);
             case "waitForNativeReady":
                 return waitForNativeReady(payload.optLong("timeoutMs", 15000));
             case "resetAutomationTab":
@@ -1440,6 +1447,262 @@ public final class IptestBridgeClient {
         }
     }
 
+    private boolean isSafePrimaryConsentLabel(String normalizedLabel) {
+        if (isBlank(normalizedLabel)) return false;
+        String normalized = normalizedLabel.trim().toLowerCase(Locale.US);
+        if (normalized.matches(
+                ".*(ustaw|preferenc|manage|settings|reject|odrzuc|odmow|decline|konfigur|dostosuj|anulowanie|zmien.*zgod).*")) {
+            return false;
+        }
+        return normalized.matches(
+                ".*(akcept|zaakcept|zgadzam|zgoda na wszystko|zezwol|accept|allow all|i agree|przejdz do serwisu|wlacz wszystko).*" );
+    }
+
+    private JSONObject dismissConsentRect(JSONObject payload) throws Exception {
+        String expectedGeneration = payload.optString("sessionGeneration", "").trim();
+        if (isBlank(expectedGeneration) || !mSessionGeneration.equals(expectedGeneration)) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("dispatched", false)
+                    .put("reason", "session_generation_mismatch")
+                    .put("expectedSessionGeneration", mSessionGeneration)
+                    .put("actualSessionGeneration", expectedGeneration);
+        }
+
+        String targetLabel = payload.optString("targetLabel", "").trim();
+        String normalizedLabel = payload.optString("targetLabelNormalized", "").trim();
+        if (!isSafePrimaryConsentLabel(normalizedLabel)) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("dispatched", false)
+                    .put("reason", "unsafe_target_label")
+                    .put("label", targetLabel)
+                    .put("sessionGeneration", mSessionGeneration);
+        }
+
+        long evidenceEpoch = payload.optLong("evidenceEpoch", -1);
+        String screenshotHash = payload.optString("screenshotHash", "").trim();
+        synchronized (LOCK) {
+            if (evidenceEpoch < 0 || evidenceEpoch < mLastConsentEvidenceEpoch) {
+                return new JSONObject()
+                        .put("ok", false)
+                        .put("dispatched", false)
+                        .put("reason", "stale_evidence_epoch")
+                        .put("evidenceEpoch", evidenceEpoch)
+                        .put("lastEvidenceEpoch", mLastConsentEvidenceEpoch);
+            }
+            if (evidenceEpoch == mLastConsentEvidenceEpoch
+                    && !isBlank(screenshotHash)
+                    && screenshotHash.equals(mLastConsentEvidenceHash)) {
+                return new JSONObject()
+                        .put("ok", false)
+                        .put("dispatched", false)
+                        .put("reason", "evidence_epoch_replayed")
+                        .put("evidenceEpoch", evidenceEpoch);
+            }
+        }
+
+        JSONObject rect = payload.optJSONObject("rect");
+        int screenshotWidth = payload.optInt("screenshotWidth", 0);
+        int screenshotHeight = payload.optInt("screenshotHeight", 0);
+        double left = rect == null ? Double.NaN : rect.optDouble("left", Double.NaN);
+        double top = rect == null ? Double.NaN : rect.optDouble("top", Double.NaN);
+        double right = rect == null ? Double.NaN : rect.optDouble("right", Double.NaN);
+        double bottom = rect == null ? Double.NaN : rect.optDouble("bottom", Double.NaN);
+        if (screenshotWidth <= 0
+                || screenshotHeight <= 0
+                || !Double.isFinite(left)
+                || !Double.isFinite(top)
+                || !Double.isFinite(right)
+                || !Double.isFinite(bottom)
+                || left < 0
+                || top < 0
+                || right > 1
+                || bottom > 1
+                || right <= left
+                || bottom <= top) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("dispatched", false)
+                    .put("reason", "invalid_screen_rect")
+                    .put("sessionGeneration", mSessionGeneration);
+        }
+
+        long startedAt = System.currentTimeMillis();
+        AtomicReference<JSONObject> dispatchResult = new AtomicReference<>();
+        CountDownLatch touchLatch = new CountDownLatch(1);
+        AtomicBoolean delayedUpScheduled = new AtomicBoolean(false);
+        ThreadUtils.postOnUiThread(
+                () -> {
+                    try {
+                        ChromeTabbedActivity activity = mActivity.get();
+                        Tab tab = activity == null ? null : activity.getActivityTab();
+                        View contentView = tab == null ? null : tab.getContentView();
+                        WebContents webContents = tab == null ? null : tab.getWebContents();
+                        if (activity == null
+                                || tab == null
+                                || contentView == null
+                                || webContents == null
+                                || !contentView.isShown()
+                                || !activity.hasWindowFocus()) {
+                            dispatchResult.set(
+                                    new JSONObject()
+                                            .put("ok", false)
+                                            .put("dispatched", false)
+                                            .put("reason", "foreground_mismatch"));
+                            return;
+                        }
+                        int orientation =
+                                activity.getResources().getConfiguration().orientation;
+                        String requestedOrientation = payload.optString("orientation", "");
+                        String currentOrientation = orientation == 2 ? "landscape" : "portrait";
+                        if (!requestedOrientation.equals(currentOrientation)) {
+                            dispatchResult.set(
+                                    new JSONObject()
+                                            .put("ok", false)
+                                            .put("dispatched", false)
+                                            .put("reason", "orientation_mismatch")
+                                            .put("expectedOrientation", currentOrientation)
+                                            .put("actualOrientation", requestedOrientation));
+                            return;
+                        }
+
+                        Point realSize = new Point();
+                        activity.getWindowManager().getDefaultDisplay().getRealSize(realSize);
+                        if (Math.abs(realSize.x - screenshotWidth) > 4
+                                || Math.abs(realSize.y - screenshotHeight) > 4) {
+                            dispatchResult.set(
+                                    new JSONObject()
+                                            .put("ok", false)
+                                            .put("dispatched", false)
+                                            .put("reason", "screen_geometry_mismatch")
+                                            .put("screenWidth", realSize.x)
+                                            .put("screenHeight", realSize.y));
+                            return;
+                        }
+
+                        int[] screenLocation = new int[2];
+                        contentView.getLocationOnScreen(screenLocation);
+                        double targetScreenXBase = ((left + right) / 2.0) * realSize.x;
+                        double targetScreenYBase = ((top + bottom) / 2.0) * realSize.y;
+                        double rectWidth = (right - left) * realSize.x;
+                        double rectHeight = (bottom - top) * realSize.y;
+                        final double targetScreenX =
+                                targetScreenXBase
+                                        + (Math.random() - 0.5)
+                                                * Math.min(12, rectWidth * 0.12);
+                        final double targetScreenY =
+                                targetScreenYBase
+                                        + (Math.random() - 0.5)
+                                                * Math.min(10, rectHeight * 0.12);
+                        float viewX = (float) (targetScreenX - screenLocation[0]);
+                        float viewY = (float) (targetScreenY - screenLocation[1]);
+                        if (viewX < 2
+                                || viewY < 2
+                                || viewX > contentView.getWidth() - 3
+                                || viewY > contentView.getHeight() - 3) {
+                            dispatchResult.set(
+                                    new JSONObject()
+                                            .put("ok", false)
+                                            .put("dispatched", false)
+                                            .put("reason", "screen_rect_outside_content_view")
+                                            .put("screenX", targetScreenX)
+                                            .put("screenY", targetScreenY));
+                            return;
+                        }
+
+                        long downTime = SystemClock.uptimeMillis();
+                        MotionEventSynthesizer synthesizer =
+                                MotionEventSynthesizer.create(contentView);
+                        synthesizer.setPointer(
+                                0, viewX, viewY, 0, MotionEvent.TOOL_TYPE_FINGER);
+                        synthesizer.inject(MotionEventAction.START, 1, 0, downTime);
+                        ThreadUtils.postOnUiThreadDelayed(
+                                () -> {
+                                    try {
+                                        synthesizer.inject(
+                                                MotionEventAction.END,
+                                                1,
+                                                0,
+                                                SystemClock.uptimeMillis());
+                                        dispatchResult.set(
+                                                new JSONObject()
+                                                        .put("ok", true)
+                                                        .put("dispatched", true)
+                                                        .put("reason", "motion_event_synthesized_from_screen_rect")
+                                                        .put("label", targetLabel)
+                                                        .put("evidenceEpoch", evidenceEpoch)
+                                                        .put(
+                                                                "touchPoint",
+                                                                new JSONObject()
+                                                                        .put("viewX", viewX)
+                                                                        .put("viewY", viewY)
+                                                                        .put("screenX", targetScreenX)
+                                                                        .put("screenY", targetScreenY))
+                                                        .put(
+                                                                "mapping",
+                                                                new JSONObject()
+                                                                        .put("source", "ocr_screen_rect")
+                                                                        .put("screenWidth", realSize.x)
+                                                                        .put("screenHeight", realSize.y)
+                                                                        .put("contentViewScreenX", screenLocation[0])
+                                                                        .put("contentViewScreenY", screenLocation[1])
+                                                                        .put("viewWidth", contentView.getWidth())
+                                                                        .put("viewHeight", contentView.getHeight())
+                                                                        .put("orientation", currentOrientation)));
+                                    } catch (Throwable t) {
+                                        dispatchResult.set(
+                                                new JSONObject()
+                                                        .put("ok", false)
+                                                        .put("dispatched", false)
+                                                        .put("reason", "motion_event_up_exception")
+                                                        .put("error", t.toString()));
+                                    } finally {
+                                        touchLatch.countDown();
+                                    }
+                                },
+                                NATIVE_CONSENT_TOUCH_DURATION_MS);
+                        delayedUpScheduled.set(true);
+                    } catch (Throwable t) {
+                        try {
+                            dispatchResult.set(
+                                    new JSONObject()
+                                            .put("ok", false)
+                                            .put("dispatched", false)
+                                            .put("reason", "motion_event_exception")
+                                            .put("error", t.toString()));
+                        } catch (Exception ignored) {
+                        }
+                    } finally {
+                        if (!delayedUpScheduled.get()) touchLatch.countDown();
+                    }
+                });
+
+        if (!touchLatch.await(2500, TimeUnit.MILLISECONDS)) {
+            return new JSONObject()
+                    .put("ok", false)
+                    .put("dispatched", false)
+                    .put("reason", "motion_event_timeout")
+                    .put("sessionGeneration", mSessionGeneration);
+        }
+        JSONObject result = dispatchResult.get();
+        if (result == null) {
+            result = new JSONObject()
+                    .put("ok", false)
+                    .put("dispatched", false)
+                    .put("reason", "motion_event_missing_result");
+        }
+        if (result.optBoolean("dispatched", false)) {
+            synchronized (LOCK) {
+                mLastConsentEvidenceEpoch = evidenceEpoch;
+                mLastConsentEvidenceHash = screenshotHash;
+            }
+        }
+        result.put("sessionGeneration", mSessionGeneration);
+        result.put("durationMs", System.currentTimeMillis() - startedAt);
+        return result;
+    }
+
     private JSONObject dismissConsent(JSONObject payload) throws Exception {
         String expectedGeneration = payload.optString("sessionGeneration", "").trim();
         if (isBlank(expectedGeneration) || !mSessionGeneration.equals(expectedGeneration)) {
@@ -2166,11 +2429,30 @@ public final class IptestBridgeClient {
     private JSONObject collectNativeStateOnUi() throws Exception {
         ChromeTabbedActivity activity = mActivity.get();
         boolean nativeReady = false;
+        boolean foreground = false;
+        String orientation = "unknown";
+        int screenWidth = 0;
+        int screenHeight = 0;
         boolean tabModelsReady = false;
         int tabCount = -1;
         int activityTabId = -1;
         Tab tab = null;
         if (activity != null) {
+            try {
+                foreground = activity.hasWindowFocus();
+            } catch (Throwable ignored) {
+            }
+            try {
+                orientation =
+                        activity.getResources().getConfiguration().orientation == 2
+                                ? "landscape"
+                                : "portrait";
+                Point realSize = new Point();
+                activity.getWindowManager().getDefaultDisplay().getRealSize(realSize);
+                screenWidth = realSize.x;
+                screenHeight = realSize.y;
+            } catch (Throwable ignored) {
+            }
             try {
                 nativeReady = activity.didFinishNativeInitialization();
             } catch (Throwable ignored) {
@@ -2237,6 +2519,11 @@ public final class IptestBridgeClient {
                         && mainFrameLive
                         && rendererHealthy;
         return new JSONObject()
+                .put("sessionGeneration", mSessionGeneration)
+                .put("foreground", foreground)
+                .put("orientation", orientation)
+                .put("screenWidth", screenWidth)
+                .put("screenHeight", screenHeight)
                 .put("nativeReady", nativeReady)
                 .put("tabModelsReady", tabModelsReady)
                 .put("tabCount", tabCount)
