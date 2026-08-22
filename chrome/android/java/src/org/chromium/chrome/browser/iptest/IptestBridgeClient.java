@@ -799,7 +799,7 @@ public final class IptestBridgeClient {
                         }
                         try {
                             String finalUrl =
-                                    eventUrl == null ? safeTabUrl(tab) : String.valueOf(eventUrl);
+                                    eventUrl == null ? safeTabUrl(tab) : safeGurlSpec(eventUrl);
                             if (isBlank(finalUrl)) finalUrl = safeTabUrl(tab);
                             appendNavigationUrl(redirectChain, finalUrl);
                             result.set(
@@ -853,7 +853,7 @@ public final class IptestBridgeClient {
 
                     private void finishIfDestinationSettled(Tab tab, String event, GURL eventUrl) {
                         if (!isCommandGenerationActive(commandGeneration)) return;
-                        String eventUrlString = eventUrl == null ? "" : String.valueOf(eventUrl);
+                        String eventUrlString = safeGurlSpec(eventUrl);
                         String tabUrl = safeTabUrl(tab);
                         appendNavigationUrl(redirectChain, eventUrlString);
                         appendNavigationUrl(redirectChain, tabUrl);
@@ -868,7 +868,7 @@ public final class IptestBridgeClient {
                     }
 
                     private void finishAfterSettledCommit(Tab tab, String event, GURL eventUrl) {
-                        String eventUrlString = eventUrl == null ? "" : String.valueOf(eventUrl);
+                        String eventUrlString = safeGurlSpec(eventUrl);
                         String tabUrl = safeTabUrl(tab);
                         appendNavigationUrl(redirectChain, eventUrlString);
                         appendNavigationUrl(redirectChain, tabUrl);
@@ -2927,10 +2927,27 @@ public final class IptestBridgeClient {
 
     private String safeTabUrl(Tab tab) {
         try {
-            return tab == null ? "" : String.valueOf(tab.getUrl());
+            return tab == null ? "" : safeGurlSpec(tab.getUrl());
         } catch (Throwable ignored) {
             return "";
         }
+    }
+
+    private static String safeGurlSpec(GURL value) {
+        try {
+            return value == null ? "" : normalizeNavigationUrl(value.getSpec());
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private static String normalizeNavigationUrl(String value) {
+        if (isBlank(value)) return "";
+        String normalized = value.trim();
+        if (normalized.startsWith("GURL(") && normalized.endsWith(")")) {
+            normalized = normalized.substring(5, normalized.length() - 1).trim();
+        }
+        return normalized;
     }
 
     private boolean urlMatches(String observed, String expected) {
@@ -2977,7 +2994,8 @@ public final class IptestBridgeClient {
     private static void appendNavigationUrl(JSONArray chain, String value) {
         if (chain == null || isBlank(value)) return;
         synchronized (chain) {
-            String normalized = value.trim();
+            String normalized = normalizeNavigationUrl(value);
+            if (isBlank(normalized)) return;
             int length = chain.length();
             if (length > 0 && normalized.equals(chain.optString(length - 1, ""))) return;
             chain.put(normalized);
@@ -2989,7 +3007,7 @@ public final class IptestBridgeClient {
         if (values == null) return "";
         for (String value : values) {
             if (isNavigationDestinationAccepted(value, requestedUrl, followRedirect)) {
-                return value.trim();
+                return normalizeNavigationUrl(value);
             }
         }
         return "";
@@ -3004,15 +3022,14 @@ public final class IptestBridgeClient {
     }
 
     private static boolean isHttpNavigationUrl(String value) {
-        if (isBlank(value)) return false;
-        String normalized = value.trim().toLowerCase(Locale.US);
+        String normalized = normalizeNavigationUrl(value).toLowerCase(Locale.US);
         return normalized.startsWith("http://") || normalized.startsWith("https://");
     }
 
     private static boolean isKnownTrackerNavigationUrl(String value) {
         if (!isHttpNavigationUrl(value)) return false;
         try {
-            String host = new URL(value).getHost().toLowerCase(Locale.US);
+            String host = new URL(normalizeNavigationUrl(value)).getHost().toLowerCase(Locale.US);
             return host.equals("doubleclick.net")
                     || host.endsWith(".doubleclick.net")
                     || host.equals("googlesyndication.com")
@@ -3034,9 +3051,10 @@ public final class IptestBridgeClient {
 
     private static boolean urlMatchesStatic(String observed, String expected) {
         if (isBlank(observed) || isBlank(expected)) return false;
-        return observed.equals(expected)
-                || observed.contains(expected)
-                || observed.equals("GURL(" + expected + ")");
+        String normalizedObserved = normalizeNavigationUrl(observed);
+        String normalizedExpected = normalizeNavigationUrl(expected);
+        return normalizedObserved.equals(normalizedExpected)
+                || normalizedObserved.contains(normalizedExpected);
     }
 
     private static boolean urlsMatchForNavigation(String first, String second) {
