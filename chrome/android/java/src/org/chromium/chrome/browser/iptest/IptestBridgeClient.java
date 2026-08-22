@@ -66,6 +66,7 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -84,7 +85,7 @@ public final class IptestBridgeClient {
     public static final String EXTRA_SESSION_GENERATION = "iptest_session_generation";
 
     private static final String TAG = "IptestBridgeClient";
-    private static final String BRIDGE_VERSION = "native-v4";
+    private static final String BRIDGE_VERSION = "native-v5";
     private static final String SWITCH_IN_PROCESS_GPU = "in-process-gpu";
     private static final Object LOCK = new Object();
     private static final long START_RETRY_DELAY_MS = 300;
@@ -123,6 +124,88 @@ public final class IptestBridgeClient {
     private volatile String mLastConsentEvidenceHash = "";
     private volatile String mLastCrash = "";
     private volatile JSONObject mLastFingerprintVisitorEvidence;
+    private final AtomicLong mCommandGeneration = new AtomicLong();
+    private volatile String mLastTabResetReason = "";
+
+    private static final class NativeCommandException extends IllegalStateException {
+        private final JSONObject details;
+
+        private NativeCommandException(String message, JSONObject details) {
+            super(message);
+            this.details = details;
+        }
+
+        static NativeCommandException timeout(
+                String command,
+                long commandGeneration,
+                String sessionGeneration,
+                long timeoutMs,
+                long executionMs,
+                String state) {
+            try {
+                return new NativeCommandException(
+                        "native_command_timeout:"
+                                + command
+                                + " after "
+                                + timeoutMs
+                                + "ms "
+                                + state,
+                        new JSONObject()
+                                .put("code", "NATIVE_COMMAND_TIMEOUT")
+                                .put("command", command)
+                                .put("rootCommand", command)
+                                .put("stage", "native_watchdog")
+                                .put("dispatched", true)
+                                .put("queueWaitMs", 0)
+                                .put("executionMs", executionMs)
+                                .put("generation", String.valueOf(commandGeneration))
+                                .put("sessionGeneration", sessionGeneration)
+                                .put("tabPreserved", true));
+            } catch (Exception ignored) {
+                return new NativeCommandException(
+                        "native_command_timeout:" + command + " after " + timeoutMs + "ms",
+                        new JSONObject());
+            }
+        }
+
+        static NativeCommandException trackerDestinationNotReached(
+                String command,
+                long commandGeneration,
+                String requestedUrl,
+                String finalUrl,
+                JSONArray redirectChain,
+                String state) {
+            try {
+                return new NativeCommandException(
+                        "TRACKER_DESTINATION_NOT_REACHED:"
+                                + requestedUrl
+                                + " final="
+                                + finalUrl
+                                + " "
+                                + state,
+                        new JSONObject()
+                                .put("code", "TRACKER_DESTINATION_NOT_REACHED")
+                                .put("command", command)
+                                .put("rootCommand", command)
+                                .put("stage", "navigation")
+                                .put("dispatched", true)
+                                .put("queueWaitMs", 0)
+                                .put("generation", String.valueOf(commandGeneration))
+                                .put("requestedUrl", requestedUrl)
+                                .put("finalUrl", finalUrl)
+                                .put("redirectChain", redirectChain)
+                                .put("tabPreserved", true));
+            } catch (Exception ignored) {
+                return new NativeCommandException(
+                        "TRACKER_DESTINATION_NOT_REACHED:" + requestedUrl,
+                        new JSONObject());
+            }
+        }
+
+        JSONObject toJson() {
+            return details;
+        }
+    }
     private Tab mObservedTab;
     private WebContents mObservedWebContents;
     private final EmptyTabObserver mAutomationTabObserver =
@@ -369,7 +452,6 @@ public final class IptestBridgeClient {
         sPendingLaunch = null;
         if (sClient != null && sClient.matches(serial, hubUrl, token, sessionGeneration)) {
             sClient.updateActivity(activity);
-            sClient.resetAutomationTabBestEffort("activity_refreshed");
             return;
         }
         if (sClient != null) sClient.stop();
@@ -527,7 +609,9 @@ public final class IptestBridgeClient {
                                 new JSONArray()
                                         .put("nativeConsentStateV1")
                                         .put("nativeAtomicConsentV1")
-                                        .put("nativeAtomicConsentRectV2")),
+                                        .put("nativeAtomicConsentRectV2")
+                                        .put("nonDestructiveCommandTimeoutV1")
+                                        .put("navigationResultV2")),
                 10000);
     }
 
@@ -540,16 +624,23 @@ public final class IptestBridgeClient {
             Log.i(TAG, "Command start: %s id=%s state=%s", name, id, readActivityState());
             Object result = executeCommandWithWatchdog(name, payload);
             Log.i(TAG, "Command success: %s id=%s", name, id);
-            submitResult(id, true, result, null);
+            submitResult(id, true, result, null, null);
         } catch (Exception e) {
             Log.w(TAG, "Command failed: %s id=%s error=%s state=%s", name, id, e.toString(), readActivityState());
-            submitResult(id, false, null, e.toString());
+            JSONObject errorDetails =
+                    e instanceof NativeCommandException
+                            ? ((NativeCommandException) e).toJson()
+                            : null;
+            submitResult(id, false, null, e.toString(), errorDetails);
         }
     }
 
     private Object executeCommandWithWatchdog(String name, JSONObject payload) throws Exception {
         long timeoutMs = commandTimeoutMs(name, payload);
-        FutureTask<Object> task = new FutureTask<>(() -> executeCommand(name, payload));
+        long commandGeneration = mCommandGeneration.incrementAndGet();
+        long startedAt = System.currentTimeMillis();
+        FutureTask<Object> task =
+                new FutureTask<>(() -> executeCommand(name, payload, commandGeneration));
         Thread thread = new Thread(task, "IPTEST-BrowserCommand-" + name);
         thread.setDaemon(true);
         thread.start();
@@ -557,11 +648,14 @@ public final class IptestBridgeClient {
             return task.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             task.cancel(true);
-            mRendererResponsive = false;
-            mLastNavigationError = "command_timeout:" + name;
-            resetAutomationTabBestEffort("command_timeout:" + name);
-            throw new IllegalStateException(
-                    "native_command_timeout:" + name + " after " + timeoutMs + "ms " + readActivityState());
+            mCommandGeneration.compareAndSet(commandGeneration, commandGeneration + 1);
+            throw NativeCommandException.timeout(
+                    name,
+                    commandGeneration,
+                    mSessionGeneration,
+                    timeoutMs,
+                    Math.max(0, System.currentTimeMillis() - startedAt),
+                    readActivityState());
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             if (cause instanceof Exception) throw (Exception) cause;
@@ -570,8 +664,10 @@ public final class IptestBridgeClient {
     }
 
     private long commandTimeoutMs(String name, JSONObject payload) {
+        long watchdogTimeout = payload.optLong("watchdogTimeoutMs", 0);
+        if (watchdogTimeout > 0) return clamp(watchdogTimeout, 1000, 60000);
         long requested = payload.optLong("timeoutMs", 0);
-        if (requested > 0) return clamp(requested + 5000, 5000, 60000);
+        if (requested > 0) return clamp(requested, 1000, 60000);
         switch (name) {
             case "cleanup":
                 return 60000;
@@ -596,11 +692,12 @@ public final class IptestBridgeClient {
         }
     }
 
-    private Object executeCommand(String name, JSONObject payload) throws Exception {
+    private Object executeCommand(String name, JSONObject payload, long commandGeneration)
+            throws Exception {
         addBridgeLog("debug", "command:start", name);
         switch (name) {
             case "navigate":
-                return navigate(payload);
+                return navigate(payload, commandGeneration);
             case "evaluate":
             case "evaluatePage":
                 return evaluatePage(
@@ -615,15 +712,17 @@ public final class IptestBridgeClient {
             case "getConsentState":
                 return getConsentState(payload.optLong("timeoutMs", 5000));
             case "dismissConsent":
-                return dismissConsent(payload);
+                return dismissConsent(payload, commandGeneration);
             case "dismissConsentRect":
-                return dismissConsentRect(payload);
+                return dismissConsentRect(payload, commandGeneration);
             case "waitForNativeReady":
                 return waitForNativeReady(payload.optLong("timeoutMs", 15000));
             case "resetAutomationTab":
-                return resetAutomationTab(payload.optString("reason", "command"));
+                return resetAutomationTab(
+                        payload.optString("reason", "command"), commandGeneration);
             case "bringTaskToFront":
-                return bringTaskToFront(payload.optString("reason", "command"));
+                return bringTaskToFront(
+                        payload.optString("reason", "command"), commandGeneration);
             case "getPageSnapshot":
                 return getPageSnapshot();
             case "clickSelector":
@@ -633,7 +732,7 @@ public final class IptestBridgeClient {
                         payload.optString("selector", ""),
                         payload.optString("value", ""));
             case "cleanup":
-                return cleanup(payload);
+                return cleanup(payload, commandGeneration);
             case "getLogs":
                 return getLogs();
             case "getVisitorIsolationEvidence":
@@ -646,17 +745,8 @@ public final class IptestBridgeClient {
                             return new JSONObject().put("ok", true);
                         });
             case "goBack":
-                return runWithTab(
-                        "about:blank",
-                        tab -> {
-                            boolean canGoBack = tab.canGoBack();
-                            if (canGoBack) tab.goBack();
-                            return new JSONObject()
-                                    .put("ok", true)
-                                    .put("navigated", canGoBack)
-                                    .put("url", safeTabUrl(tab))
-                                    .put("nativeState", collectNativeStateOnUi());
-                        });
+                return goBack(
+                        payload.optLong("timeoutMs", 15000), commandGeneration);
             case "goForward":
                 return runWithTab(
                         "about:blank",
@@ -673,9 +763,14 @@ public final class IptestBridgeClient {
         }
     }
 
-    private Object navigate(JSONObject payload) throws Exception {
+    private Object navigate(JSONObject payload, long commandGeneration) throws Exception {
         String url = payload.optString("url", "");
         if (isBlank(url)) throw new IllegalArgumentException("navigate url is required");
+        String navigationMode =
+                payload.optString("navigationMode", "direct")
+                        .trim()
+                        .toLowerCase(Locale.US);
+        boolean followRedirect = "follow_redirect".equals(navigationMode);
         String waitUntil =
                 payload.optString("waitUntil", "load")
                         .trim()
@@ -689,10 +784,13 @@ public final class IptestBridgeClient {
         AtomicReference<String> error = new AtomicReference<>();
         AtomicReference<Tab> observedTab = new AtomicReference<>();
         AtomicBoolean done = new AtomicBoolean(false);
+        JSONArray redirectChain = new JSONArray();
+        appendNavigationUrl(redirectChain, url);
 
         EmptyTabObserver observer =
                 new EmptyTabObserver() {
                     private void finish(Tab tab, String event, GURL eventUrl) {
+                        if (!isCommandGenerationActive(commandGeneration)) return;
                         if (!done.compareAndSet(false, true)) return;
                         try {
                             tab.removeObserver(this);
@@ -701,13 +799,21 @@ public final class IptestBridgeClient {
                         try {
                             String finalUrl =
                                     eventUrl == null ? safeTabUrl(tab) : String.valueOf(eventUrl);
+                            if (isBlank(finalUrl)) finalUrl = safeTabUrl(tab);
+                            appendNavigationUrl(redirectChain, finalUrl);
                             result.set(
                                     new JSONObject()
                                             .put("ok", true)
                                             .put("url", url)
+                                            .put("requestedUrl", url)
                                             .put("finalUrl", finalUrl)
                                             .put("event", event)
+                                            .put("settledEvent", event)
                                             .put("waitUntil", waitUntil)
+                                            .put("navigationMode", navigationMode)
+                                            .put("redirectChain", redirectChain)
+                                            .put("navigationError", JSONObject.NULL)
+                                            .put("tabPreserved", true)
                                             .put("durationMs", System.currentTimeMillis() - startedAt)
                                             .put("nativeState", collectNativeStateOnUi()));
                         } catch (Exception jsonError) {
@@ -717,8 +823,22 @@ public final class IptestBridgeClient {
                     }
 
                     private void fail(Tab tab, String reason) {
+                        if (!isCommandGenerationActive(commandGeneration)) return;
                         if (isBenignNavigationAbortAfterCommit(reason, tab, url)) {
                             finish(tab, "aborted_after_commit", null);
+                            return;
+                        }
+                        String currentUrl = safeTabUrl(tab);
+                        if (followRedirect
+                                && !reason.startsWith("tab_crash")
+                                && (isBlank(currentUrl)
+                                        || isKnownTrackerNavigationUrl(currentUrl))) {
+                            appendNavigationUrl(redirectChain, currentUrl);
+                            mLastNavigationError = reason;
+                            addBridgeLog(
+                                    "debug",
+                                    "navigate:tracker_intermediate_error",
+                                    reason + " currentUrl=" + currentUrl);
                             return;
                         }
                         if (!done.compareAndSet(false, true)) return;
@@ -730,34 +850,43 @@ public final class IptestBridgeClient {
                         latch.countDown();
                     }
 
-                    private void finishIfUrlMatches(Tab tab, String event, GURL eventUrl) {
+                    private void finishIfDestinationSettled(Tab tab, String event, GURL eventUrl) {
+                        if (!isCommandGenerationActive(commandGeneration)) return;
                         String eventUrlString = eventUrl == null ? "" : String.valueOf(eventUrl);
                         String tabUrl = safeTabUrl(tab);
-                        if (!urlMatches(eventUrlString, url)
-                                && !urlMatches(tabUrl, url)
-                                && !urlMatches(mLastKnownUrl, url)) {
-                            return;
-                        }
-                        finish(tab, event, eventUrl);
+                        appendNavigationUrl(redirectChain, eventUrlString);
+                        appendNavigationUrl(redirectChain, tabUrl);
+                        String candidate =
+                                firstAcceptedNavigationUrl(
+                                        url,
+                                        followRedirect,
+                                        followRedirect ? tabUrl : eventUrlString,
+                                        followRedirect ? eventUrlString : tabUrl);
+                        if (isBlank(candidate)) return;
+                        finish(tab, event, candidate.equals(eventUrlString) ? eventUrl : null);
                     }
 
                     private void finishAfterSettledCommit(Tab tab, String event, GURL eventUrl) {
                         String eventUrlString = eventUrl == null ? "" : String.valueOf(eventUrl);
                         String tabUrl = safeTabUrl(tab);
-                        if (!urlMatches(eventUrlString, url)
-                                && !urlMatches(tabUrl, url)
-                                && !urlMatches(mLastKnownUrl, url)) {
-                            return;
-                        }
+                        appendNavigationUrl(redirectChain, eventUrlString);
+                        appendNavigationUrl(redirectChain, tabUrl);
+                        String candidate =
+                                firstAcceptedNavigationUrl(
+                                        url, followRedirect, eventUrlString, tabUrl);
+                        if (isBlank(candidate)) return;
                         ThreadUtils.postOnUiThreadDelayed(
-                                () -> finishIfUrlMatches(tab, event, eventUrl),
+                                () -> finishIfDestinationSettled(tab, event, eventUrl),
                                 NAVIGATION_COMMITTED_SETTLE_MS);
                     }
 
                     @Override
                     public void onPageLoadStarted(Tab tab, GURL eventUrl) {
-                        if ("commit".equals(waitUntil)) {
-                            finishIfUrlMatches(tab, "page_load_started_committed", eventUrl);
+                        if (followRedirect) {
+                            finishAfterSettledCommit(
+                                    tab, "tracker_destination_committed_settled", eventUrl);
+                        } else if ("commit".equals(waitUntil)) {
+                            finishIfDestinationSettled(tab, "page_load_started_committed", eventUrl);
                         } else if ("domcontentloaded".equals(waitUntil)) {
                             finishAfterSettledCommit(
                                     tab, "page_load_started_committed_settled", eventUrl);
@@ -766,8 +895,11 @@ public final class IptestBridgeClient {
 
                     @Override
                     public void onUrlUpdated(Tab tab) {
-                        if ("commit".equals(waitUntil)) {
-                            finishIfUrlMatches(tab, "url_updated_committed", null);
+                        if (followRedirect) {
+                            finishAfterSettledCommit(
+                                    tab, "tracker_destination_updated_settled", null);
+                        } else if ("commit".equals(waitUntil)) {
+                            finishIfDestinationSettled(tab, "url_updated_committed", null);
                         } else if ("domcontentloaded".equals(waitUntil)) {
                             finishAfterSettledCommit(tab, "url_updated_committed_settled", null);
                         }
@@ -787,7 +919,7 @@ public final class IptestBridgeClient {
                             return;
                         }
                         if ("commit".equals(waitUntil) || "domcontentloaded".equals(waitUntil)) {
-                            finishIfUrlMatches(
+                            finishIfDestinationSettled(
                                     tab,
                                     "primary_main_frame_finished",
                                     navigation == null ? null : navigation.getUrl());
@@ -797,13 +929,13 @@ public final class IptestBridgeClient {
                     @Override
                     public void onLoadStopped(Tab tab, boolean toDifferentDocument) {
                         if ("loadstopped".equals(waitUntil) || "load".equals(waitUntil)) {
-                            finishIfUrlMatches(tab, "load_stopped", null);
+                            finishIfDestinationSettled(tab, "load_stopped", null);
                         }
                     }
 
                     @Override
                     public void onPageLoadFinished(Tab tab, GURL eventUrl) {
-                        finishIfUrlMatches(tab, "page_load_finished", eventUrl);
+                        finishIfDestinationSettled(tab, "page_load_finished", eventUrl);
                     }
 
                     @Override
@@ -820,6 +952,7 @@ public final class IptestBridgeClient {
         Runnable startNavigation =
                 () -> {
                     try {
+                        if (!isCommandGenerationActive(commandGeneration)) return;
                         ChromeTabbedActivity activity = mActivity.get();
                         Tab tab = getOrCreateActivityTab(activity, url);
                         if (tab == null) {
@@ -848,8 +981,24 @@ public final class IptestBridgeClient {
                 });
             }
             JSONObject syntheticResult =
-                    synthesizeNavigationResultIfUrlCommitted(tab, url, waitUntil, startedAt);
+                    synthesizeNavigationResultIfUrlCommitted(
+                            tab,
+                            url,
+                            waitUntil,
+                            navigationMode,
+                            redirectChain,
+                            startedAt);
             if (syntheticResult != null) return syntheticResult;
+            if (followRedirect) {
+                String finalUrl = tab == null ? "" : safeTabUrl(tab);
+                throw NativeCommandException.trackerDestinationNotReached(
+                        "navigate",
+                        commandGeneration,
+                        url,
+                        finalUrl,
+                        redirectChain,
+                        readActivityState());
+            }
             throw new IllegalStateException(
                     "native_navigation_timeout:"
                             + url
@@ -868,6 +1017,59 @@ public final class IptestBridgeClient {
         return output;
     }
 
+    private JSONObject goBack(long timeoutMs, long commandGeneration) throws Exception {
+        long boundedTimeoutMs = clamp(timeoutMs, 1000, 20000);
+        long deadlineAt = System.currentTimeMillis() + boundedTimeoutMs;
+        JSONObject beforeState = getNativeState();
+        String beforeUrl = beforeState.optString("url", beforeState.optString("lastKnownUrl", ""));
+        long beforeNavigationFinished = beforeState.optLong("lastNavigationFinished", 0);
+        AtomicBoolean navigated = new AtomicBoolean(false);
+        AtomicReference<String> dispatchError = new AtomicReference<>();
+
+        ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    try {
+                        if (!isCommandGenerationActive(commandGeneration)) return;
+                        ChromeTabbedActivity activity = mActivity.get();
+                        Tab tab = getOrCreateActivityTab(activity, beforeUrl);
+                        if (tab == null) {
+                            dispatchError.set("No current tab " + describeActivityState(activity));
+                            return;
+                        }
+                        boolean canGoBack = tab.canGoBack();
+                        navigated.set(canGoBack);
+                        if (canGoBack) tab.goBack();
+                    } catch (Throwable t) {
+                        dispatchError.set(t.toString());
+                    }
+                });
+        if (!isBlank(dispatchError.get())) throw new IllegalStateException(dispatchError.get());
+
+        JSONObject state = getNativeState();
+        String settledEvent = navigated.get() ? "history_dispatched" : "history_empty";
+        while (navigated.get()
+                && isCommandGenerationActive(commandGeneration)
+                && System.currentTimeMillis() < deadlineAt) {
+            state = getNativeState();
+            String currentUrl = state.optString("url", state.optString("lastKnownUrl", ""));
+            long navigationFinished = state.optLong("lastNavigationFinished", 0);
+            if ((!isBlank(currentUrl) && !urlsMatchForNavigation(currentUrl, beforeUrl))
+                    || navigationFinished > beforeNavigationFinished) {
+                settledEvent = "history_settled";
+                break;
+            }
+            sleep(100);
+        }
+        String finalUrl = state.optString("url", state.optString("lastKnownUrl", ""));
+        return new JSONObject()
+                .put("ok", true)
+                .put("navigated", navigated.get())
+                .put("url", finalUrl)
+                .put("settledEvent", settledEvent)
+                .put("tabPreserved", true)
+                .put("nativeState", state);
+    }
+
     private boolean isBenignNavigationAbortAfterCommit(String reason, Tab tab, String expectedUrl) {
         if (isBlank(reason) || isBlank(expectedUrl)) return false;
         boolean aborted =
@@ -877,8 +1079,11 @@ public final class IptestBridgeClient {
                         || reason.startsWith("page_load_failed:-15");
         if (!aborted) return false;
         String tabUrl = safeTabUrl(tab);
+        boolean trackerNavigation = isKnownTrackerNavigationUrl(expectedUrl);
         boolean committed =
-                urlMatches(tabUrl, expectedUrl) || urlMatches(mLastKnownUrl, expectedUrl);
+                isNavigationDestinationAccepted(tabUrl, expectedUrl, trackerNavigation)
+                        || isNavigationDestinationAccepted(
+                                mLastKnownUrl, expectedUrl, trackerNavigation);
         if (committed) {
             mLastNavigationError = "";
             addBridgeLog("debug", "navigate:aborted_after_commit", reason);
@@ -887,7 +1092,12 @@ public final class IptestBridgeClient {
     }
 
     private JSONObject synthesizeNavigationResultIfUrlCommitted(
-            Tab tab, String expectedUrl, String waitUntil, long startedAt) {
+            Tab tab,
+            String expectedUrl,
+            String waitUntil,
+            String navigationMode,
+            JSONArray redirectChain,
+            long startedAt) {
         if (tab == null) return null;
         try {
             Callable<JSONObject> fallbackCheck =
@@ -896,10 +1106,12 @@ public final class IptestBridgeClient {
                         activateAutomationTab(activity, tab);
                         if (!isUsableTab(tab) || !isTabReadyForJs(tab)) return null;
                         String finalUrl = safeTabUrl(tab);
-                        if (!urlMatches(finalUrl, expectedUrl)
-                                && !urlMatches(mLastKnownUrl, expectedUrl)) {
+                        boolean followRedirect = "follow_redirect".equals(navigationMode);
+                        if (!isNavigationDestinationAccepted(
+                                finalUrl, expectedUrl, followRedirect)) {
                             return null;
                         }
+                        appendNavigationUrl(redirectChain, finalUrl);
                         boolean stillLoading = false;
                         try {
                             stillLoading = tab.isLoading();
@@ -908,10 +1120,16 @@ public final class IptestBridgeClient {
                         return new JSONObject()
                                 .put("ok", true)
                                 .put("url", expectedUrl)
+                                .put("requestedUrl", expectedUrl)
                                 .put("finalUrl", finalUrl)
                                 .put("event", "url_committed_fallback")
+                                .put("settledEvent", "url_committed_fallback")
                                 .put("stillLoading", stillLoading)
                                 .put("waitUntil", waitUntil)
+                                .put("navigationMode", navigationMode)
+                                .put("redirectChain", redirectChain)
+                                .put("navigationError", JSONObject.NULL)
+                                .put("tabPreserved", true)
                                 .put("durationMs", System.currentTimeMillis() - startedAt)
                                 .put("nativeState", collectNativeStateOnUi());
                     };
@@ -922,15 +1140,22 @@ public final class IptestBridgeClient {
         }
     }
 
-    private Object cleanup(JSONObject payload) throws Exception {
+    private Object cleanup(JSONObject payload, long commandGeneration) throws Exception {
         long startedAt = System.currentTimeMillis();
         mLastFingerprintVisitorEvidence = null;
         List<String> verificationDomains = parseVerificationDomains(payload);
         boolean verifyStorage = payload.optBoolean("verifyStorage", !verificationDomains.isEmpty());
-        JSONObject preResetResult = resetAutomationTabBestEffort("cleanup:pre");
+        JSONObject preResetResult = preserveAutomationTabForCleanup("cleanup:pre");
+        if (!preResetResult.optBoolean("ok", false)
+                && "no_tab".equals(preResetResult.optString("reason", ""))) {
+            preResetResult = resetAutomationTabBestEffort("missing_automation_tab:cleanup:pre");
+        }
         sleep(1000);
+        assertCommandGenerationActive(commandGeneration, "cleanup:before_profile_clear");
         JSONObject profileResult = clearNativeProfileData();
+        assertCommandGenerationActive(commandGeneration, "cleanup:before_page_clear");
         JSONObject pageResult = runPageLevelCleanupBestEffort();
+        assertCommandGenerationActive(commandGeneration, "cleanup:before_verification");
         JSONObject verificationResult = verifyStorage
                 ? verifyNativeProfileDataCleared(verificationDomains)
                 : new JSONObject()
@@ -945,7 +1170,8 @@ public final class IptestBridgeClient {
         boolean pageOk = pageResult.optBoolean("ok", false);
         boolean pageBlocking = pageResult.optBoolean("blocking", false);
         boolean verificationOk = verificationResult.optBoolean("ok", false);
-        JSONObject resetResult = resetAutomationTabBestEffort("cleanup:post");
+        assertCommandGenerationActive(commandGeneration, "cleanup:before_final_tab_state");
+        JSONObject resetResult = preserveAutomationTabForCleanup("cleanup:post");
         JSONObject result =
                 new JSONObject()
                         .put("ok", nativeOk && verificationOk)
@@ -1295,6 +1521,9 @@ public final class IptestBridgeClient {
         JSONObject lastState = new JSONObject();
         boolean triedReset = false;
         while (System.currentTimeMillis() < deadline) {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("native readiness command cancelled");
+            }
             lastState = getNativeState();
             boolean nativeReady = lastState.optBoolean("nativeReady", false);
             boolean tabModelsReady = lastState.optBoolean("tabModelsReady", false);
@@ -1310,9 +1539,13 @@ public final class IptestBridgeClient {
                 sleep(500);
                 continue;
             }
-            if (!triedReset && nativeReady && tabModelsReady) {
+            boolean tabMissing =
+                    lastState.optInt("tabId", -1) < 0
+                            || !lastState.optBoolean("hasWebContents", false)
+                            || !lastState.optBoolean("hasMainFrame", false);
+            if (!triedReset && nativeReady && tabModelsReady && tabMissing) {
                 triedReset = true;
-                resetAutomationTabBestEffort("wait_for_native_ready");
+                resetAutomationTabBestEffort("missing_automation_tab");
             }
             sleep(250);
         }
@@ -1323,9 +1556,21 @@ public final class IptestBridgeClient {
     }
 
     private JSONObject resetAutomationTab(String reason) throws Exception {
+        return resetAutomationTab(reason, -1);
+    }
+
+    private JSONObject resetAutomationTab(String reason, long commandGeneration) throws Exception {
+        if (commandGeneration >= 0) {
+            assertCommandGenerationActive(commandGeneration, "resetAutomationTab:before_dispatch");
+        }
+        mLastTabResetReason = reason;
         JSONObject result =
                 ThreadUtils.runOnUiThreadBlocking(
                         () -> {
+                            if (commandGeneration >= 0
+                                    && !isCommandGenerationActive(commandGeneration)) {
+                                return staleCommandGenerationResult(commandGeneration);
+                            }
                             ChromeTabbedActivity activity = mActivity.get();
                             JSONObject output = new JSONObject();
                             try {
@@ -1353,6 +1598,29 @@ public final class IptestBridgeClient {
         return result;
     }
 
+    private JSONObject preserveAutomationTabForCleanup(String reason) {
+        return ThreadUtils.runOnUiThreadBlocking(
+                () -> {
+                    JSONObject output = new JSONObject();
+                    try {
+                        ChromeTabbedActivity activity = mActivity.get();
+                        Tab tab = activity == null ? null : activity.getActivityTab();
+                        if (tab == null || tab.isDestroyed()) {
+                            return output.put("ok", false).put("reason", "no_tab");
+                        }
+                        activateAutomationTab(activity, tab);
+                        tab.loadUrl(new LoadUrlParams("about:blank"));
+                        return output
+                                .put("ok", true)
+                                .put("reason", reason)
+                                .put("tabPreserved", true)
+                                .put("automationTabId", tab.getId());
+                    } catch (Throwable t) {
+                        return output.put("ok", false).put("reason", t.toString());
+                    }
+                });
+    }
+
     private JSONObject resetAutomationTabBestEffort(String reason) {
         try {
             return resetAutomationTab(reason);
@@ -1366,10 +1634,14 @@ public final class IptestBridgeClient {
         }
     }
 
-    private JSONObject bringTaskToFront(String reason) throws Exception {
+    private JSONObject bringTaskToFront(String reason, long commandGeneration) throws Exception {
+        assertCommandGenerationActive(commandGeneration, "bringTaskToFront:before_dispatch");
         JSONObject result =
                 ThreadUtils.runOnUiThreadBlocking(
                         () -> {
+                            if (!isCommandGenerationActive(commandGeneration)) {
+                                return staleCommandGenerationResult(commandGeneration);
+                            }
                             ChromeTabbedActivity activity = mActivity.get();
                             JSONObject output = new JSONObject();
                             try {
@@ -1458,7 +1730,8 @@ public final class IptestBridgeClient {
                 ".*(akcept|zaakcept|zgadzam|zgoda na wszystko|zezwol|accept|allow all|i agree|przejdz do serwisu|wlacz wszystko).*" );
     }
 
-    private JSONObject dismissConsentRect(JSONObject payload) throws Exception {
+    private JSONObject dismissConsentRect(JSONObject payload, long commandGeneration)
+            throws Exception {
         String expectedGeneration = payload.optString("sessionGeneration", "").trim();
         if (isBlank(expectedGeneration) || !mSessionGeneration.equals(expectedGeneration)) {
             return new JSONObject()
@@ -1535,6 +1808,11 @@ public final class IptestBridgeClient {
         ThreadUtils.postOnUiThread(
                 () -> {
                     try {
+                        if (!isCommandGenerationActive(commandGeneration)) {
+                            dispatchResult.set(
+                                    staleCommandGenerationResult(commandGeneration));
+                            return;
+                        }
                         ChromeTabbedActivity activity = mActivity.get();
                         Tab tab = activity == null ? null : activity.getActivityTab();
                         View contentView = tab == null ? null : tab.getContentView();
@@ -1620,6 +1898,11 @@ public final class IptestBridgeClient {
                         ThreadUtils.postOnUiThreadDelayed(
                                 () -> {
                                     try {
+                                        if (!isCommandGenerationActive(commandGeneration)) {
+                                            dispatchResult.set(
+                                                    staleCommandGenerationResult(commandGeneration));
+                                            return;
+                                        }
                                         synthesizer.inject(
                                                 MotionEventAction.END,
                                                 1,
@@ -1706,7 +1989,7 @@ public final class IptestBridgeClient {
         return result;
     }
 
-    private JSONObject dismissConsent(JSONObject payload) throws Exception {
+    private JSONObject dismissConsent(JSONObject payload, long commandGeneration) throws Exception {
         String expectedGeneration = payload.optString("sessionGeneration", "").trim();
         if (isBlank(expectedGeneration) || !mSessionGeneration.equals(expectedGeneration)) {
             return new JSONObject()
@@ -1838,6 +2121,11 @@ public final class IptestBridgeClient {
         ThreadUtils.postOnUiThread(
                 () -> {
                     try {
+                        if (!isCommandGenerationActive(commandGeneration)) {
+                            dispatchResult.set(
+                                    staleCommandGenerationResult(commandGeneration));
+                            return;
+                        }
                         ChromeTabbedActivity activity = mActivity.get();
                         Tab tab = activity == null ? null : activity.getActivityTab();
                         WebContents webContents = tab == null ? null : tab.getWebContents();
@@ -1928,6 +2216,11 @@ public final class IptestBridgeClient {
                         ThreadUtils.postOnUiThreadDelayed(
                                 () -> {
                                     try {
+                                        if (!isCommandGenerationActive(commandGeneration)) {
+                                            dispatchResult.set(
+                                                    staleCommandGenerationResult(commandGeneration));
+                                            return;
+                                        }
                                         ChromeTabbedActivity dispatchActivity = mActivity.get();
                                         Tab dispatchTab =
                                                 dispatchActivity == null
@@ -2550,6 +2843,7 @@ public final class IptestBridgeClient {
                 .put("lastNavigationFinished", mLastNavigationFinishedAt)
                 .put("lastNavigationEvent", mLastNavigationEvent)
                 .put("lastNavigationError", mLastNavigationError)
+                .put("lastTabResetReason", mLastTabResetReason)
                 .put("lastCrash", mLastCrash)
                 .put("readyForCommands", readyForCommands);
     }
@@ -2645,6 +2939,100 @@ public final class IptestBridgeClient {
                 || observed.equals("GURL(" + expected + ")");
     }
 
+    private boolean isCommandGenerationActive(long commandGeneration) {
+        return mCommandGeneration.get() == commandGeneration && !mStopped;
+    }
+
+    private void assertCommandGenerationActive(long commandGeneration, String stage)
+            throws InterruptedException {
+        if (isCommandGenerationActive(commandGeneration)
+                && !Thread.currentThread().isInterrupted()) {
+            return;
+        }
+        throw new InterruptedException(
+                "native command generation stale during "
+                        + stage
+                        + ": command="
+                        + commandGeneration
+                        + " active="
+                        + mCommandGeneration.get());
+    }
+
+    private JSONObject staleCommandGenerationResult(long commandGeneration) {
+        return new JSONObject()
+                .put("ok", false)
+                .put("dispatched", false)
+                .put("reason", "command_generation_stale")
+                .put("commandGeneration", commandGeneration)
+                .put("activeCommandGeneration", mCommandGeneration.get())
+                .put("sessionGeneration", mSessionGeneration);
+    }
+
+    private static void appendNavigationUrl(JSONArray chain, String value) {
+        if (chain == null || isBlank(value)) return;
+        synchronized (chain) {
+            String normalized = value.trim();
+            int length = chain.length();
+            if (length > 0 && normalized.equals(chain.optString(length - 1, ""))) return;
+            chain.put(normalized);
+        }
+    }
+
+    private static String firstAcceptedNavigationUrl(
+            String requestedUrl, boolean followRedirect, String... values) {
+        if (values == null) return "";
+        for (String value : values) {
+            if (isNavigationDestinationAccepted(value, requestedUrl, followRedirect)) {
+                return value.trim();
+            }
+        }
+        return "";
+    }
+
+    private static boolean isNavigationDestinationAccepted(
+            String candidate, String requestedUrl, boolean followRedirect) {
+        if (!isHttpNavigationUrl(candidate)) return false;
+        if (followRedirect) return !isKnownTrackerNavigationUrl(candidate);
+        return urlMatchesStatic(candidate, requestedUrl)
+                || !isKnownTrackerNavigationUrl(candidate);
+    }
+
+    private static boolean isHttpNavigationUrl(String value) {
+        if (isBlank(value)) return false;
+        String normalized = value.trim().toLowerCase(Locale.US);
+        return normalized.startsWith("http://") || normalized.startsWith("https://");
+    }
+
+    private static boolean isKnownTrackerNavigationUrl(String value) {
+        if (!isHttpNavigationUrl(value)) return false;
+        try {
+            String host = new URL(value).getHost().toLowerCase(Locale.US);
+            return host.equals("doubleclick.net")
+                    || host.endsWith(".doubleclick.net")
+                    || host.equals("googlesyndication.com")
+                    || host.endsWith(".googlesyndication.com")
+                    || host.equals("googleadservices.com")
+                    || host.endsWith(".googleadservices.com")
+                    || host.equals("adform.net")
+                    || host.endsWith(".adform.net")
+                    || host.equals("go2cloud.org")
+                    || host.endsWith(".go2cloud.org")
+                    || host.equals("clickonometrics.pl")
+                    || host.endsWith(".clickonometrics.pl")
+                    || host.equals("abtshield.com")
+                    || host.endsWith(".abtshield.com");
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private static boolean urlMatchesStatic(String observed, String expected) {
+        if (isBlank(observed) || isBlank(expected)) return false;
+        return observed.equals(expected)
+                || observed.contains(expected)
+                || observed.equals("GURL(" + expected + ")");
+    }
+
     private String describeTabState(Tab tab) {
         if (tab == null) return "tab=null";
         boolean initialized = false;
@@ -2728,7 +3116,8 @@ public final class IptestBridgeClient {
         return result;
     }
 
-    private void submitResult(String id, boolean ok, Object result, String error) {
+    private void submitResult(
+            String id, boolean ok, Object result, String error, JSONObject errorDetails) {
         if (isBlank(id)) return;
         try {
             JSONObject body =
@@ -2741,6 +3130,7 @@ public final class IptestBridgeClient {
                 body.put("result", result == null ? JSONObject.NULL : result);
             } else {
                 body.put("error", error == null ? "unknown error" : error);
+                if (errorDetails != null) body.put("errorDetails", errorDetails);
             }
             postJson("/api/iptest-browser/" + encode(mSerial) + "/result", body, 10000);
         } catch (Exception e) {
