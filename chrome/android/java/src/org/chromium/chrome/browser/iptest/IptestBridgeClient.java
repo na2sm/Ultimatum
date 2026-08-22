@@ -3033,6 +3033,10 @@ public final class IptestBridgeClient {
                 || observed.equals("GURL(" + expected + ")");
     }
 
+    private static boolean urlsMatchForNavigation(String first, String second) {
+        return urlMatchesStatic(first, second) || urlMatchesStatic(second, first);
+    }
+
     private String describeTabState(Tab tab) {
         if (tab == null) return "tab=null";
         boolean initialized = false;
