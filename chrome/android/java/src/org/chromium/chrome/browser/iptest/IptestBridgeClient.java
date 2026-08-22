@@ -41,6 +41,7 @@ import org.chromium.url.GURL;
 import org.chromium.url.Origin;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 import org.json.JSONTokener;
 
@@ -2959,13 +2960,18 @@ public final class IptestBridgeClient {
     }
 
     private JSONObject staleCommandGenerationResult(long commandGeneration) {
-        return new JSONObject()
-                .put("ok", false)
-                .put("dispatched", false)
-                .put("reason", "command_generation_stale")
-                .put("commandGeneration", commandGeneration)
-                .put("activeCommandGeneration", mCommandGeneration.get())
-                .put("sessionGeneration", mSessionGeneration);
+        JSONObject result = new JSONObject();
+        try {
+            result.put("ok", false);
+            result.put("dispatched", false);
+            result.put("reason", "command_generation_stale");
+            result.put("commandGeneration", commandGeneration);
+            result.put("activeCommandGeneration", mCommandGeneration.get());
+            result.put("sessionGeneration", mSessionGeneration);
+        } catch (JSONException ignored) {
+            // Primitive values and strings cannot fail JSON serialization.
+        }
+        return result;
     }
 
     private static void appendNavigationUrl(JSONArray chain, String value) {
