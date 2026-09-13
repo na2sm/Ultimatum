@@ -1,0 +1,37 @@
+<!doctype html>
+<!-- Copyright 2026 The Chromium Authors. All rights reserved.
+     Use of this source code is governed by a BSD-style license that can be
+     found in the LICENSE file. -->
+<meta charset="utf-8">
+<title>CSS Grid: rounding the remaining flexible share of a spanning item</title>
+<link rel="help" href="https://drafts.csswg.org/css-grid-2/#algo-spanning-flex-items">
+<meta name="assert" content="Subtracting prior flexible shares must not treat floating point rounding as flex factor overflow.">
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<div id="log"></div>
+<script>
+for (const [first, second] of [[1, 0.2], [1, 0.3], [0.3, 1], [1, 0.1]]) {
+  for (const axis of ['columns', 'rows']) {
+    test(t => {
+      const grid = document.createElement('div');
+      grid.style.display = 'grid';
+      grid.style.width = '260px';
+      grid.style.height = '260px';
+      grid.style.setProperty(`grid-template-${axis}`, `${first}fr ${second}fr`);
+      const item = document.createElement('div');
+      item.style.setProperty(axis === 'columns' ? 'grid-column' : 'grid-row', '1 / 3');
+      item.style.width = '260px';
+      item.style.height = '260px';
+      grid.append(item);
+      document.body.append(grid);
+      t.add_cleanup(() => grid.remove());
+      const tracks = getComputedStyle(grid).getPropertyValue(`grid-template-${axis}`)
+        .trim().split(/\s+/).map(parseFloat);
+      assert_equals(tracks.length, 2);
+      assert_approx_equals(tracks[0], 260 * first / (first + second), 0.03);
+      assert_approx_equals(tracks[1], 260 * second / (first + second), 0.03);
+      assert_approx_equals(tracks[0] + tracks[1], 260, 0.03);
+    }, `${axis}: a fixed spanning item across ${first}fr ${second}fr`);
+  }
+}
+</script>

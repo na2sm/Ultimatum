@@ -622,9 +622,13 @@ void DistributeExtraSpaceToSets(LayoutUnit extra_space,
     ShareRatioType set_share_ratio =
         is_equal_distribution ? set_track_count : set.FlexFactor();
 
-    // Since `share_ratio_sum` can be greater than the wtf_size_t limit, cap the
-    // value of `set_share_ratio` to prevent overflows.
-    if (set_share_ratio > share_ratio_sum) {
+    // Subtracting earlier float shares can leave the remaining sum slightly
+    // below this set's ratio. Normalize approximate equality before checking
+    // overflow, and avoid leaving a negative rounding residue after allocation.
+    if (AreEqual(set_share_ratio, share_ratio_sum)) {
+      set_share_ratio = share_ratio_sum;
+    } else if (set_share_ratio > share_ratio_sum) {
+      // The sum can exceed the wtf_size_t limit; cap genuine overflow as before.
       DCHECK(is_flex_factor_sum_overflowing_limits);
       set_share_ratio = share_ratio_sum;
     }
