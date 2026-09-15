@@ -106,6 +106,10 @@ void OverscrollRefresh::OnOverscrolled(const cc::OverscrollBehavior& behavior,
     }
   } else if (in_x_direction) {
     DCHECK_GE(viewport_width_, 0);
+    if (viewport_width_ == 0) {
+      Reset();
+      return;
+    }
     bool scroll_from_edge = scroll_begin_x_ < edge_width_ ||
                             viewport_width_ - scroll_begin_x_ < edge_width_;
     bool touchpad_swipe_to_navigate =

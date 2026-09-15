@@ -124,7 +124,8 @@ class UI_ANDROID_EXPORT OverscrollRefresh {
     kEnabled,
   } scroll_consumption_state_;
 
-  float viewport_width_;
+  // Zero until the first frame supplies geometry, or while the viewport is empty.
+  float viewport_width_ = 0;
   float scroll_begin_x_;
   float scroll_begin_y_;
   const float edge_width_;  // in px

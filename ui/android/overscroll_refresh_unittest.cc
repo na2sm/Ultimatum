@@ -4,6 +4,9 @@
 
 #include "ui/android/overscroll_refresh.h"
 
+#include <cstring>
+#include <new>
+
 #include "base/android/scoped_java_ref.h"
 #include "cc/input/overscroll_behavior.h"
 #include "testing/gtest/include/gtest/gtest.h"
@@ -154,6 +157,46 @@ TEST_F(OverscrollRefreshTest, TriggerPullToRefreshWithTouchscreen) {
   EXPECT_FALSE(effect_.IsActive());
   EXPECT_TRUE(GetAndResetPullReleased());
   EXPECT_TRUE(GetAndResetRefreshAllowed());
+}
+
+TEST_F(OverscrollRefreshTest, HorizontalScrollBeforeFirstFrameIsIgnored) {
+  // Poison reused storage so missing constructor initialization is observable.
+  for (int pattern : {0, 0xbf, 0x7f}) {
+    alignas(OverscrollRefresh) unsigned char storage[sizeof(OverscrollRefresh)];
+    std::memset(storage, pattern, sizeof(storage));
+    auto* effect = new (storage) OverscrollRefresh(this, kDefaultEdgeWidth);
+    effect->OnScrollBegin(kStartPos);
+    effect->OnOverscrolled(cc::OverscrollBehavior(), gfx::Vector2dF(-10, 0),
+                          blink::WebGestureDevice::kTouchscreen);
+    EXPECT_FALSE(GetAndResetPullStarted());
+    EXPECT_FALSE(effect->IsActive());
+    EXPECT_FALSE(effect->IsAwaitingScrollUpdateAck());
+
+    // A late frame cannot revive the discarded scroll sequence.
+    effect->OnFrameUpdated(kViewport, kZeroOffset, kContentSize,
+                           kOverflowYNotHidden);
+    effect->OnOverscrolled(cc::OverscrollBehavior(), gfx::Vector2dF(-10, 0),
+                          blink::WebGestureDevice::kTouchscreen);
+    EXPECT_FALSE(GetAndResetPullStarted());
+
+    effect->OnScrollBegin(kStartPos);
+    effect->OnOverscrolled(cc::OverscrollBehavior(), gfx::Vector2dF(-10, 0),
+                          blink::WebGestureDevice::kTouchscreen);
+    EXPECT_TRUE(GetAndResetPullStarted());
+    EXPECT_TRUE(effect->IsActive());
+    effect->~OverscrollRefresh();
+  }
+}
+
+TEST_F(OverscrollRefreshTest, EmptyViewportDoesNotActivateHistoryNavigation) {
+  effect_.OnFrameUpdated(gfx::SizeF(0, 100), kZeroOffset, kContentSize,
+                         kOverflowYNotHidden);
+  effect_.OnScrollBegin(kStartPos);
+  effect_.OnOverscrolled(cc::OverscrollBehavior(), gfx::Vector2dF(-10, 0),
+                         blink::WebGestureDevice::kTouchscreen);
+  EXPECT_FALSE(GetAndResetPullStarted());
+  EXPECT_TRUE(GetAndResetPullReset());
+  EXPECT_FALSE(effect_.IsActive());
 }
 
 TEST_F(OverscrollRefreshTest, RefreshNotTriggeredWithTouchpad) {
