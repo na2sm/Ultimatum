@@ -398,6 +398,7 @@ class PLATFORM_EXPORT InputHandlerProxy : public cc::InputHandlerClient,
   bool gesture_pinch_in_progress_ = false;
   bool in_inertial_scrolling_ = false;
   bool scroll_sequence_ignored_;
+  bool touch_sequence_active_ = false;
   std::optional<EventDisposition> main_thread_touch_sequence_start_disposition_;
 
   // Used to animate rubber-band/bounce over-scroll effect.

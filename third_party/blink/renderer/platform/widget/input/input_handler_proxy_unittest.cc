@@ -1828,6 +1828,59 @@ TEST_P(InputHandlerProxyTest, TouchTrackingEndsOnCancel) {
   VERIFY_AND_RESET_MOCKS();
 }
 
+TEST_P(InputHandlerProxyTest, NewTouchStartClosesOrphanedSequence) {
+  expected_disposition_ = InputHandlerProxy::DID_NOT_HANDLE_NON_BLOCKING;
+  VERIFY_AND_RESET_MOCKS();
+
+  EXPECT_CALL(
+      mock_input_handler_,
+      GetEventListenerProperties(cc::EventListenerClass::kTouchStartOrMove))
+      .WillRepeatedly(testing::Return(cc::EventListenerProperties::kPassive));
+  EXPECT_CALL(mock_input_handler_, EventListenerTypeForTouchStartOrMoveAt(_, _))
+      .Times(6)
+      .WillRepeatedly([](const gfx::Rect&, cc::TouchAction* touch_action) {
+        *touch_action = cc::TouchAction::kPanY;
+        return cc::InputHandler::TouchStartOrMoveEventListenerType::kNoHandler;
+      });
+  EXPECT_CALL(mock_client_, SetAllowedTouchAction(cc::TouchAction::kPanY))
+      .Times(2);
+  {
+    testing::InSequence sequence;
+    EXPECT_CALL(mock_input_handler_, SetIsHandlingTouchSequence(true));
+    EXPECT_CALL(mock_input_handler_, SetIsHandlingTouchSequence(false));
+    EXPECT_CALL(mock_input_handler_, SetIsHandlingTouchSequence(true));
+    EXPECT_CALL(mock_input_handler_, SetIsHandlingTouchSequence(false));
+  }
+
+  WebTouchEvent touch(WebInputEvent::Type::kTouchStart,
+                      WebInputEvent::kNoModifiers,
+                      WebInputEvent::GetStaticTimeStampForTests());
+  touch.touches_length = 3;
+  touch.touch_start_or_first_touch_move = true;
+  touch.touches[0] =
+      CreateWebTouchPoint(WebTouchPoint::State::kStatePressed, 0, 0);
+  touch.touches[1] =
+      CreateWebTouchPoint(WebTouchPoint::State::kStatePressed, 10, 10);
+  touch.touches[2] =
+      CreateWebTouchPoint(WebTouchPoint::State::kStatePressed, -10, 10);
+
+  touch.unique_touch_event_id = 1;
+  EXPECT_EQ(expected_disposition_,
+            HandleInputEventWithLatencyInfo(input_handler_.get(), touch));
+  // The prior gesture loses its END/CANCEL during a view or session transition.
+  touch.unique_touch_event_id = 2;
+  EXPECT_EQ(expected_disposition_,
+            HandleInputEventWithLatencyInfo(input_handler_.get(), touch));
+
+  WebTouchEvent touch_cancel(WebInputEvent::Type::kTouchCancel,
+                             WebInputEvent::kNoModifiers,
+                             WebInputEvent::GetStaticTimeStampForTests());
+  touch_cancel.unique_touch_event_id = 3;
+  EXPECT_EQ(InputHandlerProxy::DID_NOT_HANDLE,
+            HandleInputEventWithLatencyInfo(input_handler_.get(), touch_cancel));
+  VERIFY_AND_RESET_MOCKS();
+}
+
 TEST_P(InputHandlerProxyTest, TouchStartPassiveAndTouchEndBlocking) {
   // The touch start is not in a touch-region but there is a touch end handler
   // so to maintain targeting we need to dispatch the touch start as

@@ -618,13 +618,25 @@ void InputHandlerProxy::DispatchSingleInputEvent(
       break;
     case WebInputEvent::Type::kTouchStart:
       if (static_cast<const WebTouchEvent&>(event).IsTouchSequenceStart()) {
+        if (touch_sequence_active_) {
+          // A new sequence start means the old END/CANCEL was lost before it
+          // reached the compositor. Close that sequence before tracking this one.
+          input_handler_->SetIsHandlingTouchSequence(false);
+          touch_result_.reset();
+          main_thread_touch_sequence_start_disposition_.reset();
+          TRACE_EVENT_INSTANT0("input", "OrphanedTouchSequenceRecovered",
+                               TRACE_EVENT_SCOPE_THREAD);
+          UMA_HISTOGRAM_COUNTS_100("Input.OrphanedTouchSequenceRecovered", 1);
+        }
         input_handler_->SetIsHandlingTouchSequence(true);
+        touch_sequence_active_ = true;
       }
       break;
     case WebInputEvent::Type::kTouchCancel:
     case WebInputEvent::Type::kTouchEnd:
       if (static_cast<const WebTouchEvent&>(event).IsTouchSequenceEnd()) {
         input_handler_->SetIsHandlingTouchSequence(false);
+        touch_sequence_active_ = false;
       }
       break;
     default:
