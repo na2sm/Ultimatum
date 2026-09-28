@@ -1837,7 +1837,7 @@ TEST_P(InputHandlerProxyTest, NewTouchStartClosesOrphanedSequence) {
       GetEventListenerProperties(cc::EventListenerClass::kTouchStartOrMove))
       .WillRepeatedly(testing::Return(cc::EventListenerProperties::kPassive));
   EXPECT_CALL(mock_input_handler_, EventListenerTypeForTouchStartOrMoveAt(_, _))
-      .Times(6)
+      .Times(2)
       .WillRepeatedly([](const gfx::Rect&, cc::TouchAction* touch_action) {
         *touch_action = cc::TouchAction::kPanY;
         return cc::InputHandler::TouchStartOrMoveEventListenerType::kNoHandler;
