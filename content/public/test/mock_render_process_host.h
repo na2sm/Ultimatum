@@ -201,6 +201,8 @@ class MockRenderProcessHost : public RenderProcessHost {
       const base::TimeDelta& unload_handler_timeout,
       const SiteInfo& site_info) override;
   void StopTrackingProcessForShutdownDelay() override;
+  void BindCacheStorageRaw(
+      mojo::PendingReceiver<blink::mojom::CacheStorageRaw> receiver) override;
   void BindCacheStorage(
       const network::CrossOriginEmbedderPolicy&,
       mojo::PendingRemote<network::mojom::CrossOriginEmbedderPolicyReporter>,
@@ -364,6 +366,8 @@ class MockRenderProcessHost : public RenderProcessHost {
   bool is_renderer_locked_to_site_ = false;
   std::set<GlobalRenderFrameHostId> render_frame_host_id_set_;
   mojo::PendingReceiver<blink::mojom::CacheStorage> cache_storage_receiver_;
+  mojo::PendingReceiver<blink::mojom::CacheStorageRaw>
+      cache_storage_raw_receiver_;
   mojo::PendingReceiver<blink::mojom::IDBFactory> idb_factory_receiver_;
   base::WeakPtrFactory<MockRenderProcessHost> weak_ptr_factory_{this};
 };

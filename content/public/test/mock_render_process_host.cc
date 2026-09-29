@@ -587,6 +587,11 @@ bool MockRenderProcessHost::IsProcessLockedToSiteForTesting() {
   return GetProcessLock().IsLockedToSite();
 }
 
+void MockRenderProcessHost::BindCacheStorageRaw(
+    mojo::PendingReceiver<blink::mojom::CacheStorageRaw> receiver) {
+  cache_storage_raw_receiver_ = std::move(receiver);
+}
+
 void MockRenderProcessHost::BindCacheStorage(
     const network::CrossOriginEmbedderPolicy&,
     mojo::PendingRemote<network::mojom::CrossOriginEmbedderPolicyReporter>,
