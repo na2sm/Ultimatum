@@ -1628,13 +1628,21 @@ InputHandlerProxy::EventDisposition InputHandlerProxy::HandleTouchMove(
       touch_result_ = main_thread_touch_sequence_start_disposition_.value();
       result = touch_result_.value();
     } else {
+      // A move can arrive after its start disposition was lost. Hit-test it,
+      // but only the first move may establish an allowed touch action.
+      cc::TouchAction* touch_action_to_update =
+          touch_event.touch_start_or_first_touch_move ? &allowed_touch_action
+                                                      : nullptr;
       result = HitTestTouchEvent(touch_event, &is_touching_scrolling_layer,
-                                 &allowed_touch_action);
+                                 touch_action_to_update);
     }
-    TRACE_EVENT_INSTANT2(
-        "input", "Allowed TouchAction", TRACE_EVENT_SCOPE_THREAD, "TouchAction",
-        cc::TouchActionToString(allowed_touch_action), "disposition", result);
-    client_->SetAllowedTouchAction(allowed_touch_action);
+    if (touch_event.touch_start_or_first_touch_move) {
+      TRACE_EVENT_INSTANT2(
+          "input", "Allowed TouchAction", TRACE_EVENT_SCOPE_THREAD,
+          "TouchAction", cc::TouchActionToString(allowed_touch_action),
+          "disposition", result);
+      client_->SetAllowedTouchAction(allowed_touch_action);
+    }
     return result;
   }
   return touch_result_.value();
