@@ -281,6 +281,7 @@ source_set("blink_unittests_sources") {
   }
   if (is_android) {
     sources += [
+      "tests/android_chrome_tab_stubs.cc",
       "memory_usage_monitor_posix_test.cc",
       "oom_intervention_impl_test.cc",
       "user_level_memory_pressure_signal_generator_test.cc",
