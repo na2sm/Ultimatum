@@ -565,10 +565,25 @@ void InputHandlerProxy::DispatchSingleInputEvent(
 
   current_overscroll_params_.reset();
 
+  const WebInputEvent& event = event_with_callback->event();
+  if (event.GetType() == WebInputEvent::Type::kTouchStart &&
+      static_cast<const WebTouchEvent&>(event).IsTouchSequenceStart()) {
+    if (touch_sequence_active_) {
+      // Close the old sequence before the new start computes touch_result_.
+      input_handler_->SetIsHandlingTouchSequence(false);
+      touch_result_.reset();
+      main_thread_touch_sequence_start_disposition_.reset();
+      TRACE_EVENT_INSTANT0("input", "OrphanedTouchSequenceRecovered",
+                           TRACE_EVENT_SCOPE_THREAD);
+      UMA_HISTOGRAM_COUNTS_100("Input.OrphanedTouchSequenceRecovered", 1);
+    }
+    input_handler_->SetIsHandlingTouchSequence(true);
+    touch_sequence_active_ = true;
+  }
+
   InputHandlerProxy::EventDisposition disposition =
       RouteToTypeSpecificHandler(event_with_callback.get());
 
-  const WebInputEvent& event = event_with_callback->event();
   WebInputEventAttribution attribution;
   switch (disposition) {
     case DID_NOT_HANDLE:
@@ -614,22 +629,6 @@ void InputHandlerProxy::DispatchSingleInputEvent(
       if (!handling_gesture_on_impl_thread_) {
         currently_active_gesture_device_ = std::nullopt;
         currently_active_gesture_scroll_modifiers_ = std::nullopt;
-      }
-      break;
-    case WebInputEvent::Type::kTouchStart:
-      if (static_cast<const WebTouchEvent&>(event).IsTouchSequenceStart()) {
-        if (touch_sequence_active_) {
-          // A new sequence start means the old END/CANCEL was lost before it
-          // reached the compositor. Close that sequence before tracking this one.
-          input_handler_->SetIsHandlingTouchSequence(false);
-          touch_result_.reset();
-          main_thread_touch_sequence_start_disposition_.reset();
-          TRACE_EVENT_INSTANT0("input", "OrphanedTouchSequenceRecovered",
-                               TRACE_EVENT_SCOPE_THREAD);
-          UMA_HISTOGRAM_COUNTS_100("Input.OrphanedTouchSequenceRecovered", 1);
-        }
-        input_handler_->SetIsHandlingTouchSequence(true);
-        touch_sequence_active_ = true;
       }
       break;
     case WebInputEvent::Type::kTouchCancel:

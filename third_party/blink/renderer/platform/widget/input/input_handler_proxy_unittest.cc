@@ -1872,10 +1872,22 @@ TEST_P(InputHandlerProxyTest, NewTouchStartClosesOrphanedSequence) {
   EXPECT_EQ(expected_disposition_,
             HandleInputEventWithLatencyInfo(input_handler_.get(), touch));
 
+  // The replacement start must retain its hit-test result for later moves.
+  // A lost result sends a non-first move through HitTestTouchEvent with an
+  // allowed touch action pointer and DCHECKs before the page can continue.
+  touch.SetType(WebInputEvent::Type::kTouchMove);
+  touch.touch_start_or_first_touch_move = false;
+  touch.touches[0].state = WebTouchPoint::State::kStateMoved;
+  touch.touches[1].state = WebTouchPoint::State::kStateMoved;
+  touch.touches[2].state = WebTouchPoint::State::kStateMoved;
+  touch.unique_touch_event_id = 3;
+  EXPECT_EQ(expected_disposition_,
+            HandleInputEventWithLatencyInfo(input_handler_.get(), touch));
+
   WebTouchEvent touch_cancel(WebInputEvent::Type::kTouchCancel,
                              WebInputEvent::kNoModifiers,
                              WebInputEvent::GetStaticTimeStampForTests());
-  touch_cancel.unique_touch_event_id = 3;
+  touch_cancel.unique_touch_event_id = 4;
   EXPECT_EQ(InputHandlerProxy::DID_NOT_HANDLE,
             HandleInputEventWithLatencyInfo(input_handler_.get(), touch_cancel));
   VERIFY_AND_RESET_MOCKS();
