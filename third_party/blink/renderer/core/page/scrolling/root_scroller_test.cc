@@ -2182,6 +2182,11 @@ TEST_F(ImplicitRootScrollerSimTest, ContinuallyReevaluateImplicitPromotion) {
   EXPECT_EQ(container,
             GetDocument().GetRootScrollerController().EffectiveRootScroller());
 
+  // The promoted scroller still has its own transform. A subsequent hit test
+  // must not assume that every global root scroller is untransformed.
+  ASSERT_TRUE(container->GetLayoutObject()->IsGlobalRootScroller());
+  EXPECT_NE(nullptr, GetDocument().ElementFromPoint(400, 300));
+
   // No longer scrollable so demote.
   container->style()->setProperty(GetDocument().GetExecutionContext(),
                                   "overflow", "hidden", String(),
