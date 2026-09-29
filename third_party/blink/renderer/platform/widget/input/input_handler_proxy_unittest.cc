@@ -1636,6 +1636,30 @@ TEST_P(InputHandlerProxyTest, HitTestTouchEventNullTouchAction) {
   VERIFY_AND_RESET_MOCKS();
 }
 
+TEST_P(InputHandlerProxyTest, TouchMoveWithoutStartHitTestDoesNotSetTouchAction) {
+  expected_disposition_ = InputHandlerProxy::DID_NOT_HANDLE;
+  VERIFY_AND_RESET_MOCKS();
+
+  EXPECT_CALL(mock_input_handler_, EventListenerTypeForTouchStartOrMoveAt(_, _))
+      .WillOnce(testing::Return(
+          cc::InputHandler::TouchStartOrMoveEventListenerType::kHandler));
+
+  WebTouchEvent touch(WebInputEvent::Type::kTouchMove,
+                      WebInputEvent::kNoModifiers,
+                      WebInputEvent::GetStaticTimeStampForTests());
+  touch.unique_touch_event_id = 1;
+  touch.touches_length = 2;
+  touch.touch_start_or_first_touch_move = false;
+  touch.touches[0] =
+      CreateWebTouchPoint(WebTouchPoint::State::kStateMoved, 10, 10);
+  touch.touches[1] =
+      CreateWebTouchPoint(WebTouchPoint::State::kStateMoved, 20, 20);
+
+  EXPECT_EQ(expected_disposition_,
+            HandleInputEventWithLatencyInfo(input_handler_.get(), touch));
+  VERIFY_AND_RESET_MOCKS();
+}
+
 TEST_P(InputHandlerProxyTest, MultiTouchPointHitTestNegative) {
   // None of the three touch points fall in the touch region. So the event
   // should be dropped.
