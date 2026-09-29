@@ -1120,6 +1120,22 @@ TEST_F(AXRangeTest, GetTextWithEmptyRanges) {
   EXPECT_EQ(EMPTY, same_position_different_anchors_backward.GetText());
 }
 
+TEST_F(AXRangeTest, GetTextWithInvalidSelectionOffset) {
+  TestPositionInstance valid = CreateTextPosition(
+      button_, 0, ax::mojom::TextAffinity::kDownstream);
+  TestPositionInstance invalid = CreateTextPosition(
+      button_, AXNodePosition::INVALID_OFFSET,
+      ax::mojom::TextAffinity::kDownstream);
+  ASSERT_TRUE(valid->IsValid());
+  ASSERT_FALSE(invalid->IsNullPosition());
+  ASSERT_FALSE(invalid->IsValid());
+
+  TestPositionRange invalid_anchor(invalid->Clone(), valid->Clone());
+  EXPECT_EQ(EMPTY, invalid_anchor.GetText());
+  TestPositionRange invalid_focus(valid->Clone(), invalid->Clone());
+  EXPECT_EQ(EMPTY, invalid_focus.GetText());
+}
+
 TEST_F(AXRangeTest, GetTextAddingNewlineBetweenParagraphs) {
   // There are three newlines between the button and the text field. The first
   // two are emitted because there are two empty checkboxes following the button
