@@ -321,6 +321,11 @@ disk_cache::RangeResult MockDiskEntry::GetAvailableRange(
   return RangeResult(ERR_IO_PENDING);
 }
 
+disk_cache::RangesResult MockDiskEntry::GetAvailableRanges(
+    disk_cache::RangesResultCallback callback) {
+  return disk_cache::RangesResult(ERR_CACHE_OPERATION_NOT_SUPPORTED);
+}
+
 bool MockDiskEntry::CouldBeSparse() const {
   if (fail_sparse_requests_) {
     return false;

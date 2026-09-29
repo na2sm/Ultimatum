@@ -87,6 +87,8 @@ class MockDiskEntry : public disk_cache::Entry,
   RangeResult GetAvailableRange(int64_t offset,
                                 int len,
                                 RangeResultCallback callback) override;
+  disk_cache::RangesResult GetAvailableRanges(
+      disk_cache::RangesResultCallback callback) override;
   bool CouldBeSparse() const override;
   void CancelSparseIO() override;
   Error ReadyForSparseIO(CompletionOnceCallback completion_callback) override;
