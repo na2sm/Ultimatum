@@ -1304,12 +1304,10 @@ PaintLayer* PaintLayer::HitTestLayer(
 
   // For the global root scroller, hit test the layout viewport scrollbars
   // first, as they are visually presented on top of the content.
-  if (layout_object.IsGlobalRootScroller()) {
-    // There are a number of early outs below that don't apply to the the
-    // global root scroller.
-    DCHECK(!Transform());
-    DCHECK(!Preserves3D());
-    DCHECK(!layout_object.HasClipPath());
+  if (layout_object.IsGlobalRootScroller() && !Transform() && !Preserves3D() &&
+      !layout_object.HasClipPath()) {
+    // This early scrollbar pass uses root-frame coordinates. A transformed or
+    // clipped root scroller must instead use the normal hit test below.
     if (scrollable_area_) {
       gfx::Point point = scrollable_area_->ConvertFromRootFrameToVisualViewport(
           ToRoundedPoint(recursion_data.location.Point()));
