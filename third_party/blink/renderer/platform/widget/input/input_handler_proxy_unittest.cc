@@ -1837,13 +1837,15 @@ TEST_P(InputHandlerProxyTest, NewTouchStartClosesOrphanedSequence) {
       GetEventListenerProperties(cc::EventListenerClass::kTouchStartOrMove))
       .WillRepeatedly(testing::Return(cc::EventListenerProperties::kPassive));
   EXPECT_CALL(mock_input_handler_, EventListenerTypeForTouchStartOrMoveAt(_, _))
-      .Times(2)
+      .Times(6)
       .WillRepeatedly([](const gfx::Rect&, cc::TouchAction* touch_action) {
         *touch_action = cc::TouchAction::kPanY;
         return cc::InputHandler::TouchStartOrMoveEventListenerType::kNoHandler;
       });
   EXPECT_CALL(mock_client_, SetAllowedTouchAction(cc::TouchAction::kPanY))
-      .Times(2);
+      .Times(1);
+  EXPECT_CALL(mock_client_, SetAllowedTouchAction(cc::TouchAction::kAuto))
+      .Times(1);
   {
     testing::InSequence sequence;
     EXPECT_CALL(mock_input_handler_, SetIsHandlingTouchSequence(true));
