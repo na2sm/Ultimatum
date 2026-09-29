@@ -176,7 +176,7 @@ test("blink_unittests") {
     ]
 
     if (enable_extensions_core) {
-      deps += [ "//extensions/browser:browser_sources" ]
+      deps += [ "//extensions/browser:browser" ]
     }
 
     if (enable_chrome_android_internal) {
