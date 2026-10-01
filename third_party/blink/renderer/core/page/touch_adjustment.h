@@ -26,6 +26,7 @@
 #include "ui/gfx/geometry/point.h"
 #include "ui/gfx/geometry/point_f.h"
 #include "ui/gfx/geometry/rect.h"
+#include "ui/gfx/geometry/rect_f.h"
 
 namespace blink {
 
@@ -43,9 +44,9 @@ enum class TouchAdjustmentCandidateType {
 bool FindBestTouchAdjustmentCandidate(
     TouchAdjustmentCandidateType candidate_type,
     Node*& candidate_node,
-    gfx::Point& candidate_point,
-    const gfx::Point& touch_hotspot,
-    const gfx::Rect& touch_area,
+    gfx::PointF& candidate_point,
+    const gfx::PointF& touch_hotspot,
+    const gfx::RectF& touch_area,
     const HeapVector<Member<Node>>&);
 
 // Applies an upper bound to the touch area as the adjustment rect. The

@@ -198,7 +198,7 @@ class CORE_EXPORT EventHandler final : public GarbageCollected<EventHandler> {
   bool BestNodeForHitTestResult(TouchAdjustmentCandidateType candidate_type,
                                 const HitTestLocation& location,
                                 const HitTestResult&,
-                                gfx::Point& adjusted_point,
+                            gfx::PointF& adjusted_point,
                                 Node*& adjusted_node);
   void CacheTouchAdjustmentResult(uint32_t, gfx::PointF);
 

@@ -262,6 +262,47 @@ source_set("blink_bindings_test_sources") {
   ]
 }
 
+# Narrow test-only caller reproduction; no product source or assertion changes.
+test("iptest_touch_adjustment_unittests") {
+  sources = [
+    "tests/run_all_tests.cc",
+    "tests/thread_state_test_environment.h",
+    "../core/page/iptest_touch_adjustment_reproducer_test.cc",
+    "../core/page/touch_adjustment_test.cc",
+  ]
+  deps = [
+    ":controller",
+    "//base",
+    "//base:i18n",
+    "//base/test:test_support",
+    "//content/test:test_support",
+    "//testing/gmock",
+    "//testing/gtest",
+    "//third_party/blink/renderer/core:testing",
+    "//third_party/blink/renderer/core:unit_test_support",
+    "//third_party/blink/renderer/modules",
+    "//third_party/blink/renderer/platform:test_support",
+    "//v8",
+  ]
+  configs += [
+    "//third_party/blink/renderer:config",
+    "//third_party/blink/renderer:inside_blink",
+    "//third_party/blink/renderer/core:blink_core_pch",
+  ]
+  data_deps = [ "//content/shell:pak" ]
+  if (is_android) {
+    sources += [ "tests/android_chrome_tab_stubs.cc" ]
+    deps += [
+      "//content/public/android:content_java",
+      "//content/shell/android:content_shell_assets",
+      "//net/android:net_java",
+    ]
+    if (enable_extensions_core) {
+      deps += [ "//extensions/browser:browser" ]
+    }
+  }
+}
+
 source_set("blink_unittests_sources") {
   visibility = []  # Allow re-assignment of list.
   visibility = [ "*" ]

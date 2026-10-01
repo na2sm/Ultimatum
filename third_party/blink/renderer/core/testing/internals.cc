@@ -2005,7 +2005,7 @@ DOMPoint* Internals::touchPositionAdjustedToBestClickableNode(
   HitTestResult result;
   HitTestRect(location, result, x, y, width, height, document);
   Node* target_node = nullptr;
-  gfx::Point adjusted_point;
+  gfx::PointF adjusted_point;
 
   EventHandler& event_handler = document->GetFrame()->GetEventHandler();
   bool found_node = event_handler.BestNodeForHitTestResult(
@@ -2035,7 +2035,7 @@ Node* Internals::touchNodeAdjustedToBestClickableNode(
   HitTestResult result;
   HitTestRect(location, result, x, y, width, height, document);
   Node* target_node = nullptr;
-  gfx::Point adjusted_point;
+  gfx::PointF adjusted_point;
   document->GetFrame()->GetEventHandler().BestNodeForHitTestResult(
       TouchAdjustmentCandidateType::kClickable, location, result,
       adjusted_point, target_node);
@@ -2060,7 +2060,7 @@ DOMPoint* Internals::touchPositionAdjustedToBestContextMenuNode(
   HitTestResult result;
   HitTestRect(location, result, x, y, width, height, document);
   Node* target_node = nullptr;
-  gfx::Point adjusted_point;
+  gfx::PointF adjusted_point;
 
   EventHandler& event_handler = document->GetFrame()->GetEventHandler();
   bool found_node = event_handler.BestNodeForHitTestResult(
@@ -2090,7 +2090,7 @@ Node* Internals::touchNodeAdjustedToBestContextMenuNode(
   HitTestResult result;
   HitTestRect(location, result, x, y, width, height, document);
   Node* target_node = nullptr;
-  gfx::Point adjusted_point;
+  gfx::PointF adjusted_point;
   document->GetFrame()->GetEventHandler().BestNodeForHitTestResult(
       TouchAdjustmentCandidateType::kContextMenu, location, result,
       adjusted_point, target_node);
@@ -2115,7 +2115,7 @@ Node* Internals::touchNodeAdjustedToBestStylusWritableNode(
   HitTestResult result;
   HitTestRect(location, result, x, y, width, height, document);
   Node* target_node = nullptr;
-  gfx::Point adjusted_point;
+  gfx::PointF adjusted_point;
   document->GetFrame()->GetEventHandler().BestNodeForHitTestResult(
       TouchAdjustmentCandidateType::kStylusWritable, location, result,
       adjusted_point, target_node);

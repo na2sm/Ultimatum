@@ -475,7 +475,7 @@ void PointerEventManager::AdjustPointerEvent(WebPointerEvent& pointer_event,
   HitTestLocation location(PhysicalRect(hit_test_point, hit_rect_size));
   HitTestResult hit_test_result =
       root_frame.GetEventHandler().HitTestResultAtLocation(location, hit_type);
-  gfx::Point adjusted_point;
+  gfx::PointF adjusted_point;
 
   if (pointer_event.pointer_type == WebPointerProperties::PointerType::kTouch) {
     bool adjusted = frame_->GetEventHandler().BestNodeForHitTestResult(

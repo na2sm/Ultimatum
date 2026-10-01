@@ -417,37 +417,28 @@ float HybridDistanceFunction(const gfx::Point& touch_hotspot,
 }
 
 gfx::PointF ConvertToRootFrame(LocalFrameView* view, gfx::PointF pt) {
-  int x = static_cast<int>(pt.x() + 0.5f);
-  int y = static_cast<int>(pt.y() + 0.5f);
-  gfx::Point adjusted = view->ConvertToRootFrame(gfx::Point(x, y));
-  return gfx::PointF(adjusted.x(), adjusted.y());
+  return view->ConvertToRootFrame(pt);
 }
 
 // Adjusts 'point' to the nearest point inside rect, and leaves it unchanged if
 // already inside.
-void AdjustPointToRect(gfx::PointF& point, const gfx::Rect& rect) {
-  if (point.x() < rect.x()) {
-    point.set_x(rect.x());
-  } else if (point.x() >= rect.right()) {
-    point.set_x(rect.right() - 1);
-  }
-
-  if (point.y() < rect.y()) {
-    point.set_y(rect.y());
-  } else if (point.y() >= rect.bottom()) {
-    point.set_y(rect.bottom() - 1);
-  }
+void AdjustPointToRect(gfx::PointF& point, const gfx::RectF& rect) {
+  point = rect.ClosestPoint(point);
 }
 
 bool SnapTo(const SubtargetGeometry& geom,
-            const gfx::Point& touch_point,
-            const gfx::Rect& touch_area,
-            gfx::Point& snapped_point) {
+            const gfx::PointF& touch_point,
+            const gfx::RectF& touch_area,
+            gfx::PointF& snapped_point) {
   LocalFrameView* view = geom.GetNode()->GetDocument().View();
-  gfx::QuadF quad = geom.Quad();
+  const gfx::QuadF local_quad = geom.Quad();
+  gfx::QuadF quad(ConvertToRootFrame(view, local_quad.p1()),
+                  ConvertToRootFrame(view, local_quad.p2()),
+                  ConvertToRootFrame(view, local_quad.p3()),
+                  ConvertToRootFrame(view, local_quad.p4()));
 
   if (quad.IsRectilinear()) {
-    gfx::Rect bounds = view->ConvertToRootFrame(geom.BoundingBox());
+    gfx::RectF bounds = quad.BoundingBox();
     if (bounds.Contains(touch_point)) {
       snapped_point = touch_point;
       return true;
@@ -467,12 +458,6 @@ bool SnapTo(const SubtargetGeometry& geom,
   // the quad. Corner-cases exist where the quad will intersect but this will
   // fail to adjust the point to somewhere in the intersection.
 
-  gfx::PointF p1 = ConvertToRootFrame(view, quad.p1());
-  gfx::PointF p2 = ConvertToRootFrame(view, quad.p2());
-  gfx::PointF p3 = ConvertToRootFrame(view, quad.p3());
-  gfx::PointF p4 = ConvertToRootFrame(view, quad.p4());
-  quad = gfx::QuadF(p1, p2, p3, p4);
-
   if (quad.Contains(gfx::PointF(touch_point))) {
     snapped_point = touch_point;
     return true;
@@ -482,7 +467,7 @@ bool SnapTo(const SubtargetGeometry& geom,
   gfx::PointF center = quad.CenterPoint();
 
   AdjustPointToRect(center, touch_area);
-  snapped_point = gfx::ToRoundedPoint(center);
+  snapped_point = center;
 
   return quad.Contains(gfx::PointF(snapped_point));
 }
@@ -492,19 +477,20 @@ bool SnapTo(const SubtargetGeometry& geom,
 // that computes how well the touch hits the node.  Distance functions could for
 // instance be distance squared or area of intersection.
 bool FindNodeWithLowestDistanceMetric(Node*& adjusted_node,
-                                      gfx::Point& adjusted_point,
-                                      const gfx::Point& touch_hotspot,
-                                      const gfx::Rect& touch_area,
+                                      gfx::PointF& adjusted_point,
+                                      const gfx::PointF& touch_hotspot,
+                                      const gfx::RectF& touch_area,
                                       SubtargetGeometryList& subtargets,
                                       DistanceFunction distance_function) {
   adjusted_node = nullptr;
   float best_distance_metric = std::numeric_limits<float>::infinity();
-  gfx::Point snapped_point;
+  gfx::PointF snapped_point;
 
   for (const auto& subtarget : subtargets) {
     Node* node = subtarget.GetNode();
     float distance_metric =
-        distance_function(touch_hotspot, touch_area, subtarget);
+        distance_function(gfx::ToRoundedPoint(touch_hotspot),
+                          gfx::ToEnclosingRect(touch_area), subtarget);
     if (distance_metric < best_distance_metric) {
       if (SnapTo(subtarget, touch_hotspot, touch_area, snapped_point)) {
         adjusted_point = snapped_point;
@@ -535,9 +521,9 @@ bool FindNodeWithLowestDistanceMetric(Node*& adjusted_node,
 }
 
 bool FindBestCandidate(Node*& adjusted_node,
-                       gfx::Point& adjusted_point,
-                       const gfx::Point& touch_hotspot,
-                       const gfx::Rect& touch_area,
+                       gfx::PointF& adjusted_point,
+                       const gfx::PointF& touch_hotspot,
+                       const gfx::RectF& touch_area,
                        const HeapVector<Member<Node>>& nodes,
                        NodeFilter node_filter,
                        AppendSubtargetsForNode append_subtargets_for_node) {
@@ -554,9 +540,9 @@ bool FindBestCandidate(Node*& adjusted_node,
 bool FindBestTouchAdjustmentCandidate(
     TouchAdjustmentCandidateType candidate_type,
     Node*& candidate_node,
-    gfx::Point& candidate_point,
-    const gfx::Point& touch_hotspot,
-    const gfx::Rect& touch_area,
+    gfx::PointF& candidate_point,
+    const gfx::PointF& touch_hotspot,
+    const gfx::RectF& touch_area,
     const HeapVector<Member<Node>>& nodes) {
   touch_adjustment::NodeFilter node_filter;
   touch_adjustment::AppendSubtargetsForNode append_subtargets_for_node;
