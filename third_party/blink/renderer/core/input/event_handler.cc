@@ -1833,7 +1833,7 @@ bool EventHandler::BestNodeForHitTestResult(
     TouchAdjustmentCandidateType candidate_type,
     const HitTestLocation& location,
     const HitTestResult& result,
-    gfx::Point& adjusted_point,
+    gfx::PointF& adjusted_point,
     Node*& adjusted_node) {
   TRACE_EVENT0("input", "EventHandler::BestNodeForHitTestResult");
   CHECK(location.IsRectBasedTest());
@@ -1851,10 +1851,12 @@ bool EventHandler::BestNodeForHitTestResult(
     return false;
   }
 
-  gfx::Point touch_hotspot =
-      frame_->View()->ConvertToRootFrame(location.RoundedPoint());
-  gfx::Rect touch_rect =
-      frame_->View()->ConvertToRootFrame(location.ToEnclosingRect());
+  gfx::PointF touch_hotspot =
+      frame_->View()->ConvertToRootFrame(gfx::PointF(location.Point()));
+  // Snapping must use the actual fractional bounds, not the enclosing pixels.
+  const PhysicalRect root_rect =
+      frame_->View()->ConvertToRootFrame(location.BoundingBox());
+  const gfx::RectF touch_rect(root_rect);
 
   if (touch_rect.IsEmpty()) {
     return false;
@@ -2172,13 +2174,14 @@ void EventHandler::ApplyTouchAdjustment(WebGestureEvent* gesture_event,
   }
 
   Node* adjusted_node = nullptr;
-  gfx::Point adjusted_point;
+  gfx::PointF adjusted_point;
   if (BestNodeForHitTestResult(touch_adjustment_candiate_type, location,
                                hit_test_result, adjusted_point,
                                adjusted_node)) {
     // Update the hit-test result to be a point-based result instead of a
     // rect-based result.
-    PhysicalOffset point(frame_->View()->ConvertFromRootFrame(adjusted_point));
+    PhysicalOffset point = PhysicalOffset::FromPointFRound(
+        frame_->View()->ConvertFromRootFrame(adjusted_point));
     DCHECK(location.ContainsPoint(gfx::PointF(point)));
     DCHECK(location.IsRectBasedTest());
     location = hit_test_result.ResolveRectBasedTest(adjusted_node, point);

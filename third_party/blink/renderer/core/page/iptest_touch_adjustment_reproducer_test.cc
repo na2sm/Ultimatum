@@ -54,7 +54,7 @@ TEST_F(IpTestTouchAdjustmentTest, RoundedCandidateStaysInsideActualTapRect) {
   auto& handler = frame.GetEventHandler();
   const auto hit = handler.HitTestResultAtLocation(
       location, HitTestRequest::kReadOnly | HitTestRequest::kListBased);
-  gfx::Point adjusted;
+  gfx::PointF adjusted;
   Node* node = nullptr;
   ASSERT_TRUE(handler.BestNodeForHitTestResult(
       TouchAdjustmentCandidateType::kClickable, location, hit, adjusted, node));
@@ -82,6 +82,53 @@ TEST_F(IpTestTouchAdjustmentTest, OrdinaryTargetControl) {
       GetDocument().GetFrame()->GetEventHandler().TargetGestureEvent(Tap(), true);
   EXPECT_EQ(target.GetHitTestResult().InnerElement(),
             GetDocument().getElementById(AtomicString("target")));
+}
+
+TEST_F(IpTestTouchAdjustmentTest, FractionalBoundaryAcrossPageScales) {
+  for (float scale : {1.1f, 1.3f, 1.7f, 2.3f}) {
+    SCOPED_TRACE(scale);
+    GetPage().SetPageScaleFactor(scale);
+    auto& frame = *GetDocument().GetFrame();
+    const PhysicalSize size =
+        GetHitTestRectForAdjustment(frame, PhysicalSize(5, 5));
+    PhysicalOffset top_left =
+        PhysicalOffset::FromPointFRound(Tap().PositionInRootFrame());
+    top_left -= PhysicalOffset(LayoutUnit(size.width * .5f),
+                               LayoutUnit(size.height * .5f));
+    const float left = top_left.left.ToFloat() - .25f;
+    SetBodyInnerHTML(
+        "<style>body { margin: 0; } button { position: absolute; left: " +
+        String::Number(left) +
+        "px; top: 0; width: .5px; height: 60px; border: 0; padding: 0; }"
+        "</style><button id='target' aria-label='thin target'></button>");
+    HitTestLocation location(PhysicalRect(top_left, size));
+    auto& handler = frame.GetEventHandler();
+    const auto hit = handler.HitTestResultAtLocation(
+        location, HitTestRequest::kReadOnly | HitTestRequest::kListBased);
+    gfx::PointF adjusted;
+    Node* node = nullptr;
+    ASSERT_TRUE(handler.BestNodeForHitTestResult(
+        TouchAdjustmentCandidateType::kClickable, location, hit, adjusted, node));
+    ASSERT_EQ(node, GetDocument().getElementById(AtomicString("target")));
+    EXPECT_TRUE(location.ContainsPoint(frame.View()->ConvertFromRootFrame(adjusted)));
+    EXPECT_GT(adjusted.x(), left);
+    EXPECT_LT(adjusted.x(), left + .5f);
+    const auto target = handler.TargetGestureEvent(Tap(), true);
+    EXPECT_EQ(target.InnerNode(), node);
+  }
+}
+
+TEST_F(IpTestTouchAdjustmentTest, NonIntersectingTargetIsNotSelected) {
+  SetBodyInnerHTML(R"HTML(
+    <style>body { margin: 0; }
+    button { position: absolute; left: 0; top: 0; width: .5px;
+             height: 60px; border: 0; padding: 0; }</style>
+    <button id="target" aria-label="outside target"></button>
+  )HTML");
+  GetPage().SetPageScaleFactor(1.3f);
+  const auto target =
+      GetDocument().GetFrame()->GetEventHandler().TargetGestureEvent(Tap(), true);
+  EXPECT_NE(target.InnerNode(), GetDocument().getElementById(AtomicString("target")));
 }
 
 }  // namespace blink
