@@ -792,15 +792,19 @@ public final class IptestBridgeClient {
                 new EmptyTabObserver() {
                     private void finish(Tab tab, String event, GURL eventUrl) {
                         if (!isCommandGenerationActive(commandGeneration)) return;
+                        String finalUrl =
+                                followRedirect || eventUrl == null
+                                        ? safeTabUrl(tab)
+                                        : safeGurlSpec(eventUrl);
+                        if (isBlank(finalUrl)) finalUrl = safeTabUrl(tab);
+                        if (followRedirect
+                                && !isNavigationDestinationAccepted(finalUrl, url, true)) return;
                         if (!done.compareAndSet(false, true)) return;
                         try {
                             tab.removeObserver(this);
                         } catch (Throwable ignored) {
                         }
                         try {
-                            String finalUrl =
-                                    eventUrl == null ? safeTabUrl(tab) : safeGurlSpec(eventUrl);
-                            if (isBlank(finalUrl)) finalUrl = safeTabUrl(tab);
                             appendNavigationUrl(redirectChain, finalUrl);
                             result.set(
                                     new JSONObject()
@@ -858,13 +862,19 @@ public final class IptestBridgeClient {
                         appendNavigationUrl(redirectChain, eventUrlString);
                         appendNavigationUrl(redirectChain, tabUrl);
                         String candidate =
-                                firstAcceptedNavigationUrl(
-                                        url,
-                                        followRedirect,
-                                        followRedirect ? tabUrl : eventUrlString,
-                                        followRedirect ? eventUrlString : tabUrl);
+                                followRedirect
+                                        ? firstAcceptedNavigationUrl(url, true, tabUrl)
+                                        : firstAcceptedNavigationUrl(
+                                                url, false, eventUrlString, tabUrl);
                         if (isBlank(candidate)) return;
-                        finish(tab, event, candidate.equals(eventUrlString) ? eventUrl : null);
+                        // A callback can belong to the preceding document. Redirect completion
+                        // must use the current tab, not fall back to that callback's URL.
+                        finish(
+                                tab,
+                                event,
+                                !followRedirect && candidate.equals(eventUrlString)
+                                        ? eventUrl
+                                        : null);
                     }
 
                     private void finishAfterSettledCommit(Tab tab, String event, GURL eventUrl) {
@@ -873,8 +883,10 @@ public final class IptestBridgeClient {
                         appendNavigationUrl(redirectChain, eventUrlString);
                         appendNavigationUrl(redirectChain, tabUrl);
                         String candidate =
-                                firstAcceptedNavigationUrl(
-                                        url, followRedirect, eventUrlString, tabUrl);
+                                followRedirect
+                                        ? firstAcceptedNavigationUrl(url, true, tabUrl)
+                                        : firstAcceptedNavigationUrl(
+                                                url, false, eventUrlString, tabUrl);
                         if (isBlank(candidate)) return;
                         ThreadUtils.postOnUiThreadDelayed(
                                 () -> finishIfDestinationSettled(tab, event, eventUrl),
@@ -1083,8 +1095,9 @@ public final class IptestBridgeClient {
         boolean trackerNavigation = isKnownTrackerNavigationUrl(expectedUrl);
         boolean committed =
                 isNavigationDestinationAccepted(tabUrl, expectedUrl, trackerNavigation)
-                        || isNavigationDestinationAccepted(
-                                mLastKnownUrl, expectedUrl, trackerNavigation);
+                        || (!trackerNavigation
+                                && isNavigationDestinationAccepted(
+                                        mLastKnownUrl, expectedUrl, false));
         if (committed) {
             mLastNavigationError = "";
             addBridgeLog("debug", "navigate:aborted_after_commit", reason);
@@ -3030,20 +3043,21 @@ public final class IptestBridgeClient {
         if (!isHttpNavigationUrl(value)) return false;
         try {
             String host = new URL(normalizeNavigationUrl(value)).getHost().toLowerCase(Locale.US);
-            return host.equals("doubleclick.net")
-                    || host.endsWith(".doubleclick.net")
-                    || host.equals("googlesyndication.com")
-                    || host.endsWith(".googlesyndication.com")
-                    || host.equals("googleadservices.com")
-                    || host.endsWith(".googleadservices.com")
-                    || host.equals("adform.net")
-                    || host.endsWith(".adform.net")
-                    || host.equals("go2cloud.org")
-                    || host.endsWith(".go2cloud.org")
-                    || host.equals("clickonometrics.pl")
-                    || host.endsWith(".clickonometrics.pl")
-                    || host.equals("abtshield.com")
-                    || host.endsWith(".abtshield.com");
+            while (host.endsWith(".")) host = host.substring(0, host.length() - 1);
+            // Keep parity with HUB tracker-navigation.ts; the JVM replay checks both policies.
+            for (String suffix : new String[] {
+                    "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+                    "adservice.google", "adform.net", "go2cloud.org", "moviserver.com",
+                    "clickonometrics.pl", "abtshield.com", "cutt.ly"
+            }) {
+                if (host.equals(suffix) || host.endsWith("." + suffix)) return true;
+            }
+            for (String label : host.split("\\.")) {
+                if (label.equals("go2cloud") || label.equals("moviserver")
+                        || label.equals("adform") || label.equals("clickonometrics")
+                        || label.equals("abtshield")) return true;
+            }
+            return false;
         } catch (Throwable ignored) {
             return false;
         }
