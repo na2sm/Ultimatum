@@ -11,6 +11,7 @@
 #include "third_party/blink/renderer/core/dom/element.h"
 #include "third_party/blink/renderer/core/frame/local_dom_window.h"
 #include "third_party/blink/renderer/core/frame/local_frame_view.h"
+#include "third_party/blink/renderer/core/html/html_iframe_element.h"
 #include "third_party/blink/renderer/core/layout/layout_object.h"
 #include "third_party/blink/renderer/core/paint/object_paint_properties.h"
 #include "third_party/blink/renderer/core/script/classic_script.h"
@@ -51,8 +52,8 @@ class IpTestOpacityLifecycleTest : public SimTest {
     return *GetDocument().View()->RootCcLayer()->layer_tree_host()->property_trees();
   }
 
-  void AssertRealOpacityAnimation() {
-    auto* target = GetDocument().getElementById(AtomicString("target"));
+  void AssertRealOpacityAnimation(Document& document) {
+    auto* target = document.getElementById(AtomicString("target"));
     ASSERT_TRUE(target);
     ASSERT_TRUE(target->GetLayoutObject());
     const auto* properties =
@@ -64,6 +65,37 @@ class IpTestOpacityLifecycleTest : public SimTest {
     const auto* node = Trees().effect_tree().FindNodeFromElementId(effect_id_);
     ASSERT_TRUE(node);
     ASSERT_TRUE(node->has_potential_opacity_animation);
+  }
+
+  void AssertRealOpacityAnimation() {
+    AssertRealOpacityAnimation(GetDocument());
+  }
+
+  Document* LoadAnimatedFrameScene() {
+    ResizeView(gfx::Size(360, 800));
+    SimRequest main("https://example.com/frame.html", "text/html");
+    SimRequest child("https://other.example.com/opacity.html", "text/html");
+    LoadURL("https://example.com/frame.html");
+    main.Complete(R"HTML(
+      <!DOCTYPE html>
+      <style>body { margin: 0; height: 12000px; }</style>
+      <iframe id="frame" src="https://other.example.com/opacity.html"
+              width="300" height="200"></iframe>
+      <div id="sibling">Independent paint</div>
+    )HTML");
+    child.Complete(R"HTML(
+      <!DOCTYPE html>
+      <style>
+        @keyframes fade { from { opacity: .2; } to { opacity: .9; } }
+        #target { width: 150px; height: 80px; background: green;
+                  animation: fade 60s infinite; will-change: opacity; }
+      </style>
+      <div id="target">Animated child frame</div>
+    )HTML");
+    Compositor().BeginFrame();
+    auto* iframe = To<HTMLIFrameElement>(
+        GetDocument().getElementById(AtomicString("frame")));
+    return iframe->contentDocument();
   }
 
   void MutateAndPaint(const char* source) {
@@ -122,6 +154,46 @@ TEST_F(IpTestOpacityLifecycleTest, AnimatedContentOutsideViewportThenRestored) {
       "document.getElementById('sibling').style.transform='translateX(1px)'");
   MutateAndPaint("window.scrollTo(0,0)");
   ASSERT_NO_FATAL_FAILURE(AssertRealOpacityAnimation());
+}
+
+TEST_F(IpTestOpacityLifecycleTest, OffscreenAnimatedCrossOriginFrame) {
+  Document* child = LoadAnimatedFrameScene();
+  ASSERT_TRUE(child);
+  ASSERT_NO_FATAL_FAILURE(AssertRealOpacityAnimation(*child));
+  ASSERT_FALSE(child->View()->ShouldThrottleRenderingForTest());
+  MutateAndPaint(
+      "document.getElementById('frame').style.cssText="
+      "'position:absolute;left:4000px;top:4000px';");
+  GetDocument().View()->UpdateAllLifecyclePhasesForTest();
+  ASSERT_TRUE(child->View()->ShouldThrottleRenderingForTest());
+  const int sequence = Trees().sequence_number();
+  MutateAndPaint(
+      "document.getElementById('sibling').style.transform='translateX(1px)'");
+  EXPECT_GT(Trees().sequence_number(), sequence);
+  ASSERT_TRUE(child->View()->ShouldThrottleRenderingForTest());
+  MutateAndPaint("document.getElementById('frame').style.cssText=''");
+  GetDocument().View()->UpdateAllLifecyclePhasesForTest();
+  ASSERT_FALSE(child->View()->ShouldThrottleRenderingForTest());
+  ASSERT_NO_FATAL_FAILURE(AssertRealOpacityAnimation(*child));
+}
+
+TEST_F(IpTestOpacityLifecycleTest, DisplayNoneAnimatedCrossOriginFrame) {
+  Document* child = LoadAnimatedFrameScene();
+  ASSERT_TRUE(child);
+  ASSERT_NO_FATAL_FAILURE(AssertRealOpacityAnimation(*child));
+  ASSERT_FALSE(child->View()->ShouldThrottleRenderingForTest());
+  MutateAndPaint("document.getElementById('frame').style.display='none'");
+  GetDocument().View()->UpdateAllLifecyclePhasesForTest();
+  ASSERT_TRUE(child->View()->ShouldThrottleRenderingForTest());
+  const int sequence = Trees().sequence_number();
+  MutateAndPaint(
+      "document.getElementById('sibling').style.transform='translateX(1px)'");
+  EXPECT_GT(Trees().sequence_number(), sequence);
+  ASSERT_TRUE(child->View()->ShouldThrottleRenderingForTest());
+  MutateAndPaint("document.getElementById('frame').style.display=''");
+  GetDocument().View()->UpdateAllLifecyclePhasesForTest();
+  ASSERT_FALSE(child->View()->ShouldThrottleRenderingForTest());
+  ASSERT_NO_FATAL_FAILURE(AssertRealOpacityAnimation(*child));
 }
 
 }  // namespace blink
