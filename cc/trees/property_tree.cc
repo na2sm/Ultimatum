@@ -2543,7 +2543,17 @@ bool PropertyTrees::ElementIsAnimatingChanged(
         } else {
           DCHECK_NODE_EXISTENCE(check_node_existence, state, property,
                                 needs_rebuild())
-              << "Attempting to animate opacity on non existent effect node";
+              << "Attempting to animate opacity on non existent effect node"
+              << " [IPTEST-opacity2545] element_id=" << element_id.ToString()
+              << " sequence=" << sequence_number()
+              << " main_thread=" << is_main_thread()
+              << " active_tree=" << is_active()
+              << " needs_rebuild=" << needs_rebuild()
+              << " mask_running=" << mask.currently_running[property]
+              << " mask_potential=" << mask.potentially_animating[property]
+              << " state_running=" << state.currently_running[property]
+              << " state_potential=" << state.potentially_animating[property]
+              << " effect_nodes=" << effect_tree().size();
         }
         break;
       case TargetProperty::FILTER:
