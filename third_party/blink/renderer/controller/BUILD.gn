@@ -288,7 +288,11 @@ test("iptest_css_fallback_unittests") {
     "//third_party/blink/renderer:inside_blink",
     "//third_party/blink/renderer/core:blink_core_pch",
   ]
-  data_deps = [ "//content/shell:pak" ]
+  if (is_ios) {
+    bundle_deps = [ ":blink_unittests_pak_bundle_data" ]
+  } else {
+    data_deps = [ "//content/shell:pak" ]
+  }
   if (is_android) {
     sources += [ "tests/android_chrome_tab_stubs.cc" ]
     deps += [
